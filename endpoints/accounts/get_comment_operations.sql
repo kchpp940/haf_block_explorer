@@ -7,16 +7,8 @@ SET ROLE hafbe_owner;
       - Accounts
     summary: Get comment-related operations for an author-permlink.
     description: |
-      List operations related to a specific comment identified by author and permlink.
-      Internally resolves the target comment instance by analyzing the lifecycle of
-      create/delete operation boundaries. Each comment instance is bounded by its
-      creation operation ID and its deletion operation ID (or max if still active).
-      Operations (vote, edit, delete) are precisely bound to the target instance
-      using these boundaries — even if the same permlink is reused after deletion
-      under the same parent, each instance is kept separate.
-
-      Both the operation count and the paginated results use identical filtering
-      logic, ensuring pagination totals always match actual results.
+      List operations related to account. Optionally filtered by permlink,
+      time/blockrange, and specific comment-related operations.
 
       SQL example
       * `SELECT * FROM hafbe_endpoints.get_comment_operations(''blocktrades'',''blocktrades-witness-report-for-3rd-week-of-august'',''0'',1,3);`
