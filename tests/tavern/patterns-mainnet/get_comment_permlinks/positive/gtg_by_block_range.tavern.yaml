@@ -10,7 +10,7 @@
   stages:
     - name: test
       request:
-        url: "{service.proto:s}://{service.server:s}:{service.port}/rpc/get_comment_permlinks"
+        url: "{service.proto:s}://{service.server:s}:{service.port}{service.base_path}/rpc/get_comment_permlinks"
         method: POST  
         headers:
           content-type: application/json

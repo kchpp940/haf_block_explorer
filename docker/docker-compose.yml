@@ -118,9 +118,6 @@ services:
         condition: service_completed_successfully
   backend-postgrest:
     image: ${POSTGREST_REGISTRY:-postgrest/postgrest}:${POSTGREST_VERSION:-latest}
-    ports:
-      - "3000:3000"
-      - "3001:3001"
     environment:
       PGRST_ADMIN_SERVER_PORT: 3001
       PGRST_DB_URI: postgresql://hafbe_owner@haf:5432/haf_block_log
@@ -128,8 +125,10 @@ services:
       PGRST_DB_ANON_ROLE: hafbe_user
       PGRST_DB_POOL: 20
       PGRST_DB_POOL_ACQUISITION_TIMEOUT: 10
-      PGRST_OPENAPI_SERVER_PROXY_URI: http://localhost:3000
+      PGRST_OPENAPI_SERVER_PROXY_URI: http://localhost:8080${HAFBE_API_BASE_PATH:-/hafbe-api}
       PGRST_DB_EXTRA_SEARCH_PATH: hafbe_bal, reptracker_app
+      PGRST_DB_CONFIG: |
+        custom.hafbe_api_base_path = "${HAFBE_API_BASE_PATH:-/hafbe-api}"
     networks:
       haf-network:
     depends_on:
@@ -137,19 +136,37 @@ services:
         condition: service_healthy
       backend-block-processing:
         condition: service_healthy
-  swagger:
-    image: ${SWAGGER_REGISTRY:-swaggerapi/swagger-ui}:${SWAGGER_VERSION:-latest}
+  backend-rewriter:
+    image: ${BACKEND_REGISTRY:-registry.gitlab.syncad.com/hive/haf_block_explorer}:${BACKEND_VERSION:-latest}-rewriter
     ports:
-      - "8080:8080"
-    profiles:
-      - swagger
+      - "8080:80"
     environment:
-      API_URL: http://localhost:3000/
-    healthcheck:
-      test: ["CMD-SHELL","curl -f localhost:8080"]
+      HAFBE_API_BASE_PATH: ${HAFBE_API_BASE_PATH:-/hafbe-api}
+      REWRITE_LOG: ${REWRITE_LOG:-off}
+    networks:
+      haf-network:
     depends_on:
       backend-postgrest:
         condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL","curl -f localhost:81/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+  swagger:
+    image: ${SWAGGER_REGISTRY:-swaggerapi/swagger-ui}:${SWAGGER_VERSION:-latest}
+    ports:
+      - "8081:8080"
+    profiles:
+      - swagger
+    environment:
+      API_URL: http://localhost:8080${HAFBE_API_BASE_PATH:-/hafbe-api}/
+    healthcheck:
+      test: ["CMD-SHELL","curl -f localhost:8080"]
+    depends_on:
+      backend-rewriter:
+        condition: service_healthy
   pghero:
     image: ${PGHERO_REGISTRY:-ankane/pghero}:${PGHERO_VERSION:-latest}
     ports:

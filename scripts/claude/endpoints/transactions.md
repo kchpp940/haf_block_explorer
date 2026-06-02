@@ -48,16 +48,16 @@ Returns array of `hafbe_backend.transaction_stats`:
 
 ```bash
 # Get yearly transaction stats
-curl "http://localhost:3000/hafbe-api/transaction-statistics"
+curl "http://localhost:8080/hafbe-api/transaction-statistics"
 
 # Get monthly stats
-curl "http://localhost:3000/hafbe-api/transaction-statistics?granularity=monthly"
+curl "http://localhost:8080/hafbe-api/transaction-statistics?granularity=monthly"
 
 # Get daily stats for a specific range
-curl "http://localhost:3000/hafbe-api/transaction-statistics?granularity=daily&from-block=2020-01-01%2000:00:00&to-block=2020-12-31%2023:59:59"
+curl "http://localhost:8080/hafbe-api/transaction-statistics?granularity=daily&from-block=2020-01-01%2000:00:00&to-block=2020-12-31%2023:59:59"
 
 # Sort oldest first
-curl "http://localhost:3000/hafbe-api/transaction-statistics?direction=asc"
+curl "http://localhost:8080/hafbe-api/transaction-statistics?direction=asc"
 ```
 
 ## Return Types

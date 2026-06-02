@@ -61,8 +61,17 @@ Finally `scripts/ci-helpers/build_ci-runner_image.sh [src_dir]` will build *ci-r
 
 The Composefile contains profiles that add additional containers to the setup:
 
-- *swagger* - adds the Swagger UI running on port 8080
+- *swagger* - adds the Swagger UI running on port 8081
 - *db-tools* - adds PgHero running on port 2080 and PgAdmin running on port 1080
+
+### Default Ports
+
+When running with Docker Compose, these ports are exposed by default:
+
+- **API (via nginx rewriter)**: `8080` - Access API at `http://localhost:8080/hafbe-api/`
+- **Swagger UI**: `8081` - Only with `--profile swagger`
+- **PgHero**: `2080` - Only with `--profile db-tools`
+- **PgAdmin**: `1080` - Only with `--profile db-tools`
 
 You can enable the profiles by adding the profile option to `docker compose` command, eg. `docker compose --profile swagger up -d`. To enable multiple profiles specify the option multiple times (like with `--file` option in [Configuring containers by using override files](#configuring-containers-by-using-override-files) section).
 

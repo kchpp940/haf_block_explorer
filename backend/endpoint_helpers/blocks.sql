@@ -7,10 +7,9 @@ SET ROLE hafbe_owner;
  * the results using the shared blocksearch_build_result function.
  *
  * DESIGN:
- *   1. validate_block_search_params does ALL validation + parsing (single source of truth)
- *   2. Single CASE statement routes to the appropriate gatherer
- *   3. All gatherers return gatherer_result (intermediate type)
- *   4. blocksearch_build_result handles ALL enrichment (single point of truth)
+ *   1. Single CASE statement routes to the appropriate gatherer
+ *   2. All gatherers return gatherer_result (intermediate type)
+ *   3. blocksearch_build_result handles ALL enrichment (single point of truth)
  *
  * FILTER COMBINATIONS (8 total):
  *   1. no_filter       - No filters
@@ -30,75 +29,77 @@ SET ROLE hafbe_owner;
  *   _to          - Ending block (NULL = current head)
  *   _page        - Page number (1-based)
  *   _limit       - Page size
- *   _path_filter - Raw path-filter TEXT[] from API (NULL = no key filter)
+ *   _key_content - Array of values to match for key-value filter
+ *   _setof_keys  - JSON array of paths for key-value filter
  *
  * RETURNS: block_history with enriched block data
  */
 CREATE OR REPLACE FUNCTION hafbe_backend.get_blocks_by_ops(
-    _operations   INT[],
-    _account      INT,
-    _order_is     hafbe_backend.sort_direction,
-    _from         INT,
-    _to           INT,
-    _page         INT,
-    _limit        INT,
-    _path_filter  TEXT[]
+    _operations  INT[],
+    _account     INT,
+    _order_is    hafbe_backend.sort_direction,
+    _from        INT,
+    _to          INT,
+    _page        INT,
+    _limit       INT,
+    _key_content TEXT[],
+    _setof_keys  JSON
 )
 RETURNS hafbe_backend.block_history
 LANGUAGE 'plpgsql' STABLE
 AS
 $$
 DECLARE
-  __validated   hafbe_backend.blocksearch_validated_params;
-  __gathered    hafbe_backend.gatherer_result;
+  __gathered           hafbe_backend.gatherer_result;
+  __filter_by_op       BOOLEAN := (_operations IS NOT NULL);
+  __filter_by_single   BOOLEAN := (_operations IS NOT NULL AND array_length(_operations, 1) = 1);
+  __filter_by_account  BOOLEAN := (_account IS NOT NULL);
+  __filter_by_key      BOOLEAN := (_key_content[1] IS NOT NULL);
 BEGIN
-  __validated := hafbe_backend.validate_block_search_params(_operations, _account, _path_filter);
-
+  -- Route to appropriate gatherer (single CASE statement)
   __gathered := CASE
     -- 1. No filter
-    WHEN NOT __validated.filter_by_op AND NOT __validated.filter_by_account AND NOT __validated.filter_by_key THEN
+    WHEN NOT __filter_by_op AND NOT __filter_by_account AND NOT __filter_by_key THEN
       hafbe_backend.blocksearch_no_filter(_from, _to, _order_is, _page, _limit)
 
     -- 2. Single operation only
-    WHEN __validated.filter_by_single AND NOT __validated.filter_by_account AND NOT __validated.filter_by_key THEN
+    WHEN __filter_by_single AND NOT __filter_by_account AND NOT __filter_by_key THEN
       hafbe_backend.blocksearch_single_op(_operations[1], _from, _to, _order_is, _page, _limit)
 
     -- 3. Multiple operations only
-    WHEN __validated.filter_by_op AND __validated.op_count > 1 AND NOT __validated.filter_by_account AND NOT __validated.filter_by_key THEN
+    WHEN __filter_by_op AND NOT __filter_by_single AND NOT __filter_by_account AND NOT __filter_by_key THEN
       hafbe_backend.blocksearch_multi_op(_operations, _from, _to, _order_is, _page, _limit)
 
-    -- 4. Single operation + key-value filter (no account)
-    WHEN __validated.filter_by_single AND NOT __validated.filter_by_account AND __validated.filter_by_key THEN
-      hafbe_backend.blocksearch_key_value(_operations[1], _from, _to, _order_is, _page, _limit, __validated.key_content, __validated.set_of_keys)
+    -- 4. Single operation + key-value filter
+    WHEN __filter_by_single AND NOT __filter_by_account AND __filter_by_key THEN
+      hafbe_backend.blocksearch_key_value(_operations[1], _from, _to, _order_is, _page, _limit, _key_content, _setof_keys)
 
     -- 5. Account only
-    WHEN NOT __validated.filter_by_op AND __validated.filter_by_account AND NOT __validated.filter_by_key THEN
+    WHEN NOT __filter_by_op AND __filter_by_account AND NOT __filter_by_key THEN
       hafbe_backend.blocksearch_account(_account, _from, _to, _order_is, _page, _limit)
 
     -- 6. Account + single operation
-    WHEN __validated.filter_by_single AND __validated.filter_by_account AND NOT __validated.filter_by_key THEN
+    WHEN __filter_by_single AND __filter_by_account AND NOT __filter_by_key THEN
       hafbe_backend.blocksearch_account_op(_operations[1], _account, _from, _to, _order_is, _page, _limit)
 
     -- 7. Account + multiple operations
-    WHEN __validated.filter_by_op AND __validated.op_count > 1 AND __validated.filter_by_account AND NOT __validated.filter_by_key THEN
+    WHEN __filter_by_op AND NOT __filter_by_single AND __filter_by_account AND NOT __filter_by_key THEN
       hafbe_backend.blocksearch_account_multi_op(_operations, _account, _from, _to, _order_is, _page, _limit)
 
     -- 8. Account + single operation + key-value filter
-    -- This is the ONLY path for account + key filter combination
-    WHEN __validated.filter_by_single AND __validated.filter_by_account AND __validated.filter_by_key THEN
-      hafbe_backend.blocksearch_account_key_value(_operations[1], _account, _from, _to, _order_is, _page, _limit, __validated.key_content, __validated.set_of_keys)
+    WHEN __filter_by_single AND __filter_by_account AND __filter_by_key THEN
+      hafbe_backend.blocksearch_account_key_value(_operations[1], _account, _from, _to, _order_is, _page, _limit, _key_content, _setof_keys)
 
     ELSE
       NULL
   END;
 
+  -- Handle invalid parameter combinations
   IF __gathered IS NULL THEN
-    RAISE EXCEPTION 'Unhandled parameter combination: operation_types count=%, account=%, key_filter=%. This is a bug in validate_block_search_params.',
-      __validated.op_count,
-      CASE WHEN __validated.filter_by_account THEN 'yes' ELSE 'no' END,
-      CASE WHEN __validated.filter_by_key THEN 'yes' ELSE 'no' END;
+    RAISE EXCEPTION 'Invalid parameter combination';
   END IF;
 
+  -- Enrich and return (single point of enrichment)
   RETURN hafbe_backend.blocksearch_build_result(__gathered, _order_is);
 END
 $$;

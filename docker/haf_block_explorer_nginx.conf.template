@@ -52,7 +52,7 @@ http {
         listen 0.0.0.0:80 default_server;
         server_name _;
 
-        location / {
+        location ${HAFBE_API_BASE_PATH}/ {
             # Set the path_filters variable
             set_by_lua_block $path_filters {
                 local args = ngx.var.args or ""
@@ -72,6 +72,7 @@ http {
             # otherwise it will remain disabled
             ${REWRITE_LOG}
 
+            rewrite ^${HAFBE_API_BASE_PATH}/(.*)$ /$1 break;
             proxy_pass http://block-explorer-postgrest:3000;
 
             proxy_set_header Host $host;
@@ -80,6 +81,10 @@ http {
             proxy_hide_header Content-Location;
             proxy_set_header Connection "";
             proxy_http_version 1.1;
+        }
+
+        location / {
+            return 301 ${HAFBE_API_BASE_PATH}/;
         }
     }
     server {

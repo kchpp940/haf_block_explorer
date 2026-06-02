@@ -19,7 +19,7 @@ Tavern tests validate HAFBE API endpoint responses against expected patterns. Th
 ### Run All Tests (Parallel)
 ```bash
 export HAFBE_ADDRESS=localhost
-export HAFBE_PORT=3000
+export HAFBE_PORT=8080
 cd tests/tavern/patterns-mainnet
 pytest -n 8 .
 ```
@@ -177,8 +177,8 @@ markers =
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `HAFBE_ADDRESS` | Yes | PostgREST host (e.g., localhost) |
-| `HAFBE_PORT` | Yes | PostgREST port (e.g., 3000) |
+| `HAFBE_ADDRESS` | Yes | API host (e.g., localhost) |
+| `HAFBE_PORT` | Yes | API port (e.g., 8080) |
 
 ## Pattern Files
 

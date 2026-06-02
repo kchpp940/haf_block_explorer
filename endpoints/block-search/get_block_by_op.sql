@@ -303,15 +303,27 @@ DECLARE
   _account_id INT                   := hafah_backend.get_account_id("account-name", FALSE);
   _head_block_num INT               := hafbe_backend.get_hafbe_head_block();
   _operation_types INT[]            := hafah_backend.get_operation_types("operation-types", TRUE);
+
+  _key_content TEXT[]               := NULL;
+  _set_of_keys JSON                 := NULL;
 BEGIN
   PERFORM hafbe_backend.validate_limit("page-size", 1000);
   PERFORM hafbe_backend.validate_negative_limit("page-size");
   PERFORM hafbe_backend.validate_negative_page("page");
   PERFORM hafbe_backend.validate_block_num_too_high(_block_range.first_block, _head_block_num);
 
-  -- ALL parameter validation + path-filter parsing + key whitelist is done
-  -- inside validate_block_search_params (called by get_blocks_by_ops).
-  -- No separate validation needed here.
+  IF hafah_backend.is_path_filter_not_empty("path-filter") THEN
+    -- if path-filter is not empty, validate if extra indexes are available
+    -- and if the operation type is single
+    PERFORM hafbe_backend.validate_block_search_indexes();
+    PERFORM hafbe_backend.validate_single_operation_type(_operation_types);
+
+    SELECT param_json::JSON, param_text::TEXT[]
+    INTO _set_of_keys, _key_content
+    FROM hafah_backend.parse_path_filters("path-filter");
+
+    PERFORM hafbe_backend.validate_path_filter_keys(_operation_types, _set_of_keys);
+  END IF;
 
   IF _block_range.last_block <= hive.app_get_irreversible_block() AND _block_range.last_block IS NOT NULL THEN
     PERFORM set_config('response.headers', '[{"Cache-Control": "public, max-age=31536000"}]', true);
@@ -327,7 +339,8 @@ BEGIN
     _block_range.last_block,
     "page",
     "page-size",
-    "path-filter"
+    _key_content,
+    _set_of_keys
   );
 
 END

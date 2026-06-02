@@ -7,3 +7,4 @@
       proto: http
       server: "{tavern.env_vars.HAFBE_ADDRESS}"
       port: "{tavern.env_vars.HAFBE_PORT}"
+      base_path: "{tavern.env_vars.HAFBE_API_BASE_PATH:/hafbe-api}"

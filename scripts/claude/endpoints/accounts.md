@@ -66,7 +66,7 @@ Returns `hafbe_backend.account`:
 #### Example
 
 ```bash
-curl "http://localhost:3000/hafbe-api/accounts/blocktrades"
+curl "http://localhost:8080/hafbe-api/accounts/blocktrades"
 ```
 
 #### Data Sources
@@ -175,7 +175,7 @@ Returns `hafbe_backend.operation_history`:
 #### Example
 
 ```bash
-curl "http://localhost:3000/hafbe-api/accounts/blocktrades/operations/comments/my-post?page-size=10"
+curl "http://localhost:8080/hafbe-api/accounts/blocktrades/operations/comments/my-post?page-size=10"
 ```
 
 **Note:** Requires comment search indexes to be installed.

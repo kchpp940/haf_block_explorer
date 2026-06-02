@@ -11,7 +11,7 @@
   stages:
     - name: test
       request:
-        url: "{service.proto:s}://{service.server:s}:{service.port}/rpc/get_witnesses"
+        url: "{service.proto:s}://{service.server:s}:{service.port}{service.base_path}/rpc/get_witnesses"
         method: POST  
         headers:
           content-type: application/json

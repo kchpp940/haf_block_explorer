@@ -5,6 +5,15 @@ set -o pipefail
 
 SCRIPTDIR="$( cd -- "$(dirname "$0")" >/dev/null 2>&1 || exit 1; pwd -P )"
 
+# Default API base path
+HAFBE_API_BASE_PATH="${HAFBE_API_BASE_PATH:-/hafbe-api}"
+
+# Ensure base path starts with / and has no trailing /
+HAFBE_API_BASE_PATH="/$(echo "$HAFBE_API_BASE_PATH" | sed 's|^/||;s|/$||')"
+
+export HAFBE_API_BASE_PATH
+echo "Using HAFBE_API_BASE_PATH: ${HAFBE_API_BASE_PATH}"
+
 # Fetch process_openapi.py from common-ci-configuration if not available locally
 COMMON_CI_REF="${COMMON_CI_REF:-develop}"
 COMMON_CI_URL="${COMMON_CI_URL:-https://gitlab.syncad.com/hive/common-ci-configuration/-/raw/${COMMON_CI_REF}}"
@@ -19,6 +28,11 @@ endpoints="endpoints"
 rewrite_dir="${endpoints}_openapi"
 input_file="rewrite_rules.conf"
 temp_output_file=$(mktemp)
+temp_rewrite_file=$(mktemp)
+
+# Substitute HAFBE_API_BASE_PATH in rewrite rules before processing
+sed "s|\${HAFBE_API_BASE_PATH}|${HAFBE_API_BASE_PATH}|g" "../${endpoints}/${input_file}" > "$temp_rewrite_file"
+input_file="$temp_rewrite_file"
 
 # Default directories with fixed order if none provided
 OUTPUT="$SCRIPTDIR/output"
@@ -129,7 +143,13 @@ mv "$OUTPUT/../$endpoints" "$SCRIPTDIR/../$rewrite_dir"
 rm -rf "$SCRIPTDIR/output"
 
 # Create rewrite_rules.conf inside endpoints_openapi
+# The generated rules should keep the ${HAFBE_API_BASE_PATH} placeholder for runtime substitution
 reverse_lines > "$temp_output_file"
-mv "$temp_output_file" "$SCRIPTDIR/../$rewrite_dir/$input_file"
-rm "$input_file"
+
+# Restore the ${HAFBE_API_BASE_PATH} placeholder in the output file
+sed "s|${HAFBE_API_BASE_PATH}|\${HAFBE_API_BASE_PATH}|g" "$temp_output_file" > "$SCRIPTDIR/../$rewrite_dir/rewrite_rules.conf"
+
+# Cleanup temp files
+rm -f "$temp_output_file" "$temp_rewrite_file"
+
 echo "Rewritten scripts saved in $rewrite_dir"

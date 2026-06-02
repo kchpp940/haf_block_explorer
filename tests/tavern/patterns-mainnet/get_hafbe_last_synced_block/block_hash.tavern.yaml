@@ -10,7 +10,7 @@
   stages:
     - name: test
       request:
-        url: "{service.proto:s}://{service.server:s}:{service.port}/rpc/get_hafbe_last_synced_block"
+        url: "{service.proto:s}://{service.server:s}:{service.port}{service.base_path}/rpc/get_hafbe_last_synced_block"
         method: POST  
         headers:
           content-type: application/json
