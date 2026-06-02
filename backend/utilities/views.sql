@@ -403,4 +403,87 @@ SELECT
   (SELECT ops.op_type_id FROM hafd.operations ops WHERE ops.id = t.source_op) AS op_type_id
 FROM hafbe_app.proposal_votes_history t;
 
+-- ============================================================================
+-- SECTION 6: Resolved Views (Unified Voter Stats)
+-- ============================================================================
+-- These views encapsulate the SINGLE source of truth for resolving voter vest
+-- stats. All witness-vote consumers (cache refresh, get_witness_voters,
+-- get_witness_votes_history, get_witness_voters_num) MUST use these views
+-- instead of inlining their own LEFT JOIN fallback logic.
+--
+-- RESOLUTION STRATEGY:
+--   1. Try account_vest_stats_cache (pre-computed, covers active voters)
+--   2. Fall back to expired_voter_stats_view (computed on-the-fly, covers all)
+--   3. Default to 0 if neither source has data
+--
+-- This ensures proxy cascade deletions, expired accounts, and unvotes are
+-- handled identically across all API endpoints and cache refresh.
+-- ============================================================================
+
+/*
+ * witness_current_votes_resolved_view: Current votes with resolved vest stats.
+ *
+ * Single source of truth for:
+ *   - get_witness_voters()       - voter list endpoint
+ *   - get_witness_voters_count() - voter count
+ *   - get_witness_voters_num()   - voter count endpoint
+ *   - process_witness_votes_cache() Cache 2 (witness_votes_cache)
+ *
+ * COLUMNS:
+ *   voter_id        - Account casting the vote
+ *   witness_id      - Witness being voted for
+ *   source_op       - Operation ID of the vote
+ *   source_op_block - Block number of the vote
+ *   op_type_id      - Operation type of the vote
+ *   vests           - Resolved total vesting power (0 if no stats available)
+ *   account_vests   - Resolved own vesting power
+ *   proxied_vests   - Resolved proxied vesting power
+ */
+CREATE OR REPLACE VIEW hafbe_backend.witness_current_votes_resolved_view AS
+SELECT
+  cwv.voter_id,
+  cwv.witness_id,
+  cwv.source_op,
+  cwv.source_op_block,
+  cwv.op_type_id,
+  COALESCE(avs.vests, evs.vests, 0)           AS vests,
+  COALESCE(avs.account_vests, evs.account_vests, 0) AS account_vests,
+  COALESCE(avs.proxied_vests, evs.proxied_vests, 0) AS proxied_vests
+FROM hafbe_backend.current_witness_votes_view cwv
+LEFT JOIN hafbe_app.account_vest_stats_cache avs ON avs.account_id = cwv.voter_id
+LEFT JOIN hafbe_backend.expired_voter_stats_view evs ON evs.account_id = cwv.voter_id;
+
+/*
+ * witness_votes_history_resolved_view: Vote history with resolved vest stats.
+ *
+ * Single source of truth for:
+ *   - get_witness_votes_history() - history endpoint
+ *   - process_witness_votes_cache() Cache 4 (witness_votes_change_cache)
+ *
+ * COLUMNS:
+ *   witness_id      - Witness being voted for
+ *   voter_id        - Account casting the vote
+ *   approve         - TRUE for vote, FALSE for unvote
+ *   source_op       - Operation ID that caused this change
+ *   source_op_block - Block number extracted from source_op
+ *   op_type_id      - Operation type extracted from source_op
+ *   vests           - Resolved total vesting power (0 if no stats available)
+ *   account_vests   - Resolved own vesting power
+ *   proxied_vests   - Resolved proxied vesting power
+ */
+CREATE OR REPLACE VIEW hafbe_backend.witness_votes_history_resolved_view AS
+SELECT
+  wvh.witness_id,
+  wvh.voter_id,
+  wvh.approve,
+  wvh.source_op,
+  wvh.source_op_block,
+  wvh.op_type_id,
+  COALESCE(avs.vests, evs.vests, 0)           AS vests,
+  COALESCE(avs.account_vests, evs.account_vests, 0) AS account_vests,
+  COALESCE(avs.proxied_vests, evs.proxied_vests, 0) AS proxied_vests
+FROM hafbe_backend.witness_votes_history_view wvh
+LEFT JOIN hafbe_app.account_vest_stats_cache avs ON avs.account_id = wvh.voter_id
+LEFT JOIN hafbe_backend.expired_voter_stats_view evs ON evs.account_id = wvh.voter_id;
+
 RESET ROLE;

@@ -56,11 +56,10 @@ BEGIN
      *
      * PURPOSE: Fetch voters with their vesting stats, sorted and paginated.
      *
-     * JOINS:
-     *   - current_witness_votes_view: Active votes for the witness
-     *   - account_vest_stats_cache: Pre-calculated vest breakdowns
-     *   - blocks_view: Vote timestamp from block
-     *   - accounts_view: Voter account name
+     * DATA SOURCE: Uses witness_current_votes_resolved_view as the SINGLE
+     * source of truth for voter vest resolution. This view encapsulates the
+     * proxy/expired fallback logic, guaranteeing the voter list matches
+     * exactly what the cache (witness_votes_cache) and count endpoints return.
      *
      * DYNAMIC SORT:
      *   Uses CASE expressions to enable sorting by different columns.
@@ -70,40 +69,34 @@ BEGIN
     WITH limited_set AS MATERIALIZED (
       SELECT
         av.name,
-        avs.vests,
-        avs.account_vests,
-        avs.proxied_vests,
-        bv.created_at
-      FROM hafbe_backend.current_witness_votes_view cwv
-      JOIN hafbe_app.account_vest_stats_cache avs ON avs.account_id = cwv.voter_id
-      JOIN hive.blocks_view bv                    ON bv.num = cwv.source_op_block
-      JOIN hive.accounts_view av                  ON av.id = cwv.voter_id
+        rv.vests,
+        rv.account_vests,
+        rv.proxied_vests,
+        bv.created_at,
+        rv.voter_id,
+        rv.source_op_block
+      FROM hafbe_backend.witness_current_votes_resolved_view rv
+      JOIN hive.blocks_view bv   ON bv.num = rv.source_op_block
+      JOIN hive.accounts_view av ON av.id = rv.voter_id
       WHERE
-        cwv.witness_id = "witness" AND
-        ("filter_account" IS NULL OR cwv.voter_id = "filter_account")
+        rv.witness_id = "witness" AND
+        ("filter_account" IS NULL OR rv.voter_id = "filter_account")
       ORDER BY
-        -- Sort by total vests (account + proxied)
-        (CASE WHEN "direction" = 'desc' AND "sort" = 'vests'          THEN avs.vests           ELSE NULL END) DESC,
-        (CASE WHEN "direction" = 'asc'  AND "sort" = 'vests'          THEN avs.vests           ELSE NULL END) ASC,
-        -- Sort by account's own vests only
-        (CASE WHEN "direction" = 'desc' AND "sort" = 'account_vests'  THEN avs.account_vests   ELSE NULL END) DESC,
-        (CASE WHEN "direction" = 'asc'  AND "sort" = 'account_vests'  THEN avs.account_vests   ELSE NULL END) ASC,
-        -- Sort by vests received via proxy
-        (CASE WHEN "direction" = 'desc' AND "sort" = 'proxied_vests'  THEN avs.proxied_vests   ELSE NULL END) DESC,
-        (CASE WHEN "direction" = 'asc'  AND "sort" = 'proxied_vests'  THEN avs.proxied_vests   ELSE NULL END) ASC,
-        -- Sort by voter name alphabetically
+        (CASE WHEN "direction" = 'desc' AND "sort" = 'vests'          THEN rv.vests            ELSE NULL END) DESC,
+        (CASE WHEN "direction" = 'asc'  AND "sort" = 'vests'          THEN rv.vests            ELSE NULL END) ASC,
+        (CASE WHEN "direction" = 'desc' AND "sort" = 'account_vests'  THEN rv.account_vests    ELSE NULL END) DESC,
+        (CASE WHEN "direction" = 'asc'  AND "sort" = 'account_vests'  THEN rv.account_vests    ELSE NULL END) ASC,
+        (CASE WHEN "direction" = 'desc' AND "sort" = 'proxied_vests'  THEN rv.proxied_vests    ELSE NULL END) DESC,
+        (CASE WHEN "direction" = 'asc'  AND "sort" = 'proxied_vests'  THEN rv.proxied_vests    ELSE NULL END) ASC,
         (CASE WHEN "direction" = 'desc' AND "sort" = 'voter'          THEN av.name             ELSE NULL END) DESC,
         (CASE WHEN "direction" = 'asc'  AND "sort" = 'voter'          THEN av.name             ELSE NULL END) ASC,
-        -- Sort by vote timestamp (using block number as proxy)
-        (CASE WHEN "direction" = 'desc' AND "sort" = 'timestamp'      THEN cwv.source_op_block ELSE NULL END) DESC,
-        (CASE WHEN "direction" = 'asc'  AND "sort" = 'timestamp'      THEN cwv.source_op_block ELSE NULL END) ASC,
-        -- Tiebreaker: voter_id for stable ordering
-        (CASE WHEN "direction" = 'desc'                               THEN cwv.voter_id        ELSE NULL END) DESC,
-        (CASE WHEN "direction" = 'asc'                                THEN cwv.voter_id        ELSE NULL END) ASC
+        (CASE WHEN "direction" = 'desc' AND "sort" = 'timestamp'      THEN rv.source_op_block  ELSE NULL END) DESC,
+        (CASE WHEN "direction" = 'asc'  AND "sort" = 'timestamp'      THEN rv.source_op_block  ELSE NULL END) ASC,
+        (CASE WHEN "direction" = 'desc'                               THEN rv.voter_id         ELSE NULL END) DESC,
+        (CASE WHEN "direction" = 'asc'                                THEN rv.voter_id         ELSE NULL END) ASC
       OFFSET __offset
       LIMIT "page-size"
     )
-    -- Cast numeric values to TEXT to avoid JSON compression issues with large numbers
     SELECT
       ls.name::TEXT,
       ls.vests::TEXT,
@@ -160,109 +153,49 @@ BEGIN
      *
      * PURPOSE: Fetch vote history with vest stats at time of vote.
      *
-     * NOTE: Uses LEFT JOIN to account_vest_stats_cache because voters who
-     * removed their vote won't have current stats. These will be filled
-     * from expired_voter_stats_view in later CTEs.
+     * DATA SOURCE: Uses witness_votes_history_resolved_view as the SINGLE
+     * source of truth for voter vest resolution. This view encapsulates the
+     * proxy/expired fallback logic that was previously spread across 3 CTEs
+     * (limited_set + empty_results + not_empty_results + union_results).
+     *
+     * The resolved view always provides a vest value (falling back to
+     * expired_voter_stats_view when account_vest_stats_cache has no entry),
+     * so no post-fetch NULL-filling is needed.
      */
     WITH limited_set AS MATERIALIZED (
       SELECT
         av.name,
-        cwv.voter_id,
-        cwv.approve,
-        avs.vests,
-        avs.account_vests,
-        avs.proxied_vests,
-        cwv.source_op_block,
+        rv.voter_id,
+        rv.approve,
+        rv.vests,
+        rv.account_vests,
+        rv.proxied_vests,
+        rv.source_op_block,
         bv.created_at
-      FROM hafbe_backend.witness_votes_history_view cwv
-      -- LEFT JOIN: voter may no longer be active, stats may be NULL
-      LEFT JOIN hafbe_app.account_vest_stats_cache avs ON avs.account_id = cwv.voter_id
-      JOIN hive.blocks_view bv                         ON bv.num = cwv.source_op_block
-      JOIN hive.accounts_view av                       ON av.id = cwv.voter_id
+      FROM hafbe_backend.witness_votes_history_resolved_view rv
+      JOIN hive.blocks_view bv   ON bv.num = rv.source_op_block
+      JOIN hive.accounts_view av ON av.id = rv.voter_id
       WHERE
-        cwv.witness_id = "witness" AND
-        ("filter_account" IS NULL OR cwv.voter_id = "filter_account") AND
-        ("from-block" IS NULL     OR cwv.source_op_block >= "from-block") AND
-        ("to-block" IS NULL       OR cwv.source_op_block <= "to-block")
+        rv.witness_id = "witness" AND
+        ("filter_account" IS NULL OR rv.voter_id = "filter_account") AND
+        ("from-block" IS NULL     OR rv.source_op_block >= "from-block") AND
+        ("to-block" IS NULL       OR rv.source_op_block <= "to-block")
       ORDER BY
-        (CASE WHEN "direction" = 'desc' THEN cwv.source_op_block ELSE NULL END) DESC,
-        (CASE WHEN "direction" = 'asc'  THEN cwv.source_op_block ELSE NULL END) ASC,
-        (CASE WHEN "direction" = 'desc' THEN cwv.voter_id        ELSE NULL END) DESC,
-        (CASE WHEN "direction" = 'asc'  THEN cwv.voter_id        ELSE NULL END) ASC
+        (CASE WHEN "direction" = 'desc' THEN rv.source_op_block ELSE NULL END) DESC,
+        (CASE WHEN "direction" = 'asc'  THEN rv.source_op_block ELSE NULL END) ASC,
+        (CASE WHEN "direction" = 'desc' THEN rv.voter_id        ELSE NULL END) DESC,
+        (CASE WHEN "direction" = 'asc'  THEN rv.voter_id        ELSE NULL END) ASC
       OFFSET __offset
       LIMIT "page-size"
-    ),
-
-    /*
-     * =========================================================================
-     * CTE: empty_results
-     * =========================================================================
-     * PURPOSE: For voters without current stats, fetch from expired stats.
-     *
-     * Expired voter stats are preserved for historical accuracy even after
-     * a voter removes their vote.
-     */
-    empty_results AS (
-      SELECT
-        ls.name,
-        ls.voter_id,
-        ls.approve,
-        evs.vests,
-        evs.account_vests,
-        evs.proxied_vests,
-        ls.source_op_block,
-        ls.created_at
-      FROM limited_set ls
-      JOIN hafbe_backend.expired_voter_stats_view evs ON evs.account_id = ls.voter_id
-      WHERE ls.vests IS NULL
-    ),
-
-    /*
-     * =========================================================================
-     * CTE: not_empty_results
-     * =========================================================================
-     * PURPOSE: Pass through records that already have stats.
-     */
-    not_empty_results AS (
-      SELECT
-        ls.name,
-        ls.voter_id,
-        ls.approve,
-        ls.vests,
-        ls.account_vests,
-        ls.proxied_vests,
-        ls.source_op_block,
-        ls.created_at
-      FROM limited_set ls
-      WHERE ls.vests IS NOT NULL
-    ),
-
-    /*
-     * =========================================================================
-     * CTE: union_results
-     * =========================================================================
-     * PURPOSE: Combine records with and without current stats.
-     */
-    union_results AS (
-      SELECT * FROM empty_results
-      UNION ALL
-      SELECT * FROM not_empty_results
     )
-
     SELECT
-      ur.name::TEXT,
-      ur.approve,
-      ur.vests::TEXT,
-      ur.account_vests::TEXT,
-      ur.proxied_vests::TEXT,
-      ur.created_at
-    FROM union_results ur
-    -- Re-apply sort after UNION
-    ORDER BY
-      (CASE WHEN "direction" = 'desc' THEN ur.source_op_block ELSE NULL END) DESC,
-      (CASE WHEN "direction" = 'asc'  THEN ur.source_op_block ELSE NULL END) ASC,
-      (CASE WHEN "direction" = 'desc' THEN ur.voter_id        ELSE NULL END) DESC,
-      (CASE WHEN "direction" = 'asc'  THEN ur.voter_id        ELSE NULL END) ASC
+      ls.name::TEXT,
+      ls.approve,
+      ls.vests::TEXT,
+      ls.account_vests::TEXT,
+      ls.proxied_vests::TEXT,
+      ls.created_at
+    FROM limited_set ls
   );
 END
 $$;
@@ -479,6 +412,12 @@ $$;
  *   _filter_account_id - Optional: filter to specific voter
  *
  * RETURNS: Count of voters matching criteria
+ *
+ * DATA SOURCE: Uses witness_votes_cache (which is built from
+ * witness_current_votes_resolved_view) as the primary source,
+ * ensuring the count matches get_witness() and get_witnesses().
+ * Falls back to a direct count from the resolved view if cache
+ * is unavailable or a filter is applied.
  */
 CREATE OR REPLACE FUNCTION hafbe_backend.get_witness_voters_count(
     _witness_id        INT,
@@ -489,11 +428,27 @@ LANGUAGE 'plpgsql' STABLE
 AS
 $$
 BEGIN
-  RETURN COUNT(*)
-  FROM hafbe_backend.current_witness_votes_view
-  WHERE
-    witness_id = _witness_id AND
-    (_filter_account_id IS NULL OR voter_id = _filter_account_id);
+  IF _filter_account_id IS NOT NULL THEN
+    RETURN COUNT(*)
+    FROM hafbe_backend.witness_current_votes_resolved_view
+    WHERE
+      witness_id = _witness_id AND
+      voter_id = _filter_account_id;
+  END IF;
+
+  RETURN COALESCE(
+    (
+      SELECT voters_num
+      FROM hafbe_app.witness_votes_cache
+      WHERE witness_id = _witness_id
+    ),
+    (
+      SELECT COUNT(*)
+      FROM hafbe_backend.witness_current_votes_resolved_view
+      WHERE witness_id = _witness_id
+    ),
+    0
+  );
 END
 $$;
 

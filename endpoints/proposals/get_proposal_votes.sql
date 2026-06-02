@@ -109,8 +109,7 @@ DECLARE
   _ops_count   INT;
   _total_pages INT;
   _result      hafbe_backend.proposal_vote[];
-  _voter_id    INT       := hafah_backend.get_account_id("voter", FALSE);
-  _now         TIMESTAMP := (SELECT created_at FROM hive.blocks_view WHERE num = hafbe_backend.get_hafbe_head_block());
+  _voter_id    INT := hafah_backend.get_account_id("voter", FALSE);
 BEGIN
   PERFORM hafbe_backend.validate_limit("page-size", 1000);
   PERFORM hafbe_backend.validate_negative_limit("page-size");
@@ -118,7 +117,7 @@ BEGIN
 
   PERFORM set_config('response.headers', '[{"Cache-Control": "public, max-age=2"}]', true);
 
-  _ops_count   := hafbe_backend.get_proposal_votes_count("status", "proposal-id", _voter_id, _now);
+  _ops_count   := hafbe_backend.get_proposal_votes_count("status", "proposal-id", _voter_id);
   _total_pages := hafah_backend.total_pages(_ops_count, "page-size");
 
   PERFORM hafbe_backend.validate_page("page", _total_pages);
@@ -139,8 +138,7 @@ BEGIN
       "sort",
       "direction",
       "proposal-id",
-      _voter_id,
-      _now
+      _voter_id
     ) ba
   ) row;
 
