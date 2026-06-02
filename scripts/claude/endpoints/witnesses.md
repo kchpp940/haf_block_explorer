@@ -70,13 +70,13 @@ Returns `hafbe_backend.witnesses_return`:
 
 ```bash
 # Get top 20 witnesses by votes
-curl "http://localhost:8080/hafbe-api/witnesses?page-size=20"
+curl "http://localhost:3000/hafbe-api/witnesses?page-size=20"
 
 # Sort by missed blocks descending
-curl "http://localhost:8080/hafbe-api/witnesses?sort=missed_blocks&direction=desc"
+curl "http://localhost:3000/hafbe-api/witnesses?sort=missed_blocks&direction=desc"
 
 # Get witnesses sorted by name
-curl "http://localhost:8080/hafbe-api/witnesses?sort=witness&direction=asc"
+curl "http://localhost:3000/hafbe-api/witnesses?sort=witness&direction=asc"
 ```
 
 ---
@@ -122,7 +122,7 @@ Returns `hafbe_backend.witness`:
 #### Example
 
 ```bash
-curl "http://localhost:8080/hafbe-api/witnesses/blocktrades"
+curl "http://localhost:3000/hafbe-api/witnesses/blocktrades"
 ```
 
 ---

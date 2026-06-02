@@ -120,17 +120,51 @@ $$;
 -- =============================================================================
 
 /*
- * proposal_status_matches: Single source of truth for proposal status filtering.
+ * get_proposal_status: Single source of truth for ALL proposal status logic.
+ *
+ * Returns the human-readable status of a proposal at a given point in time:
+ *   - 'removed'  : proposal was removed (removed = TRUE)
+ *   - 'expired'  : now is after end_date
+ *   - 'inactive' : now is before start_date
+ *   - 'active'   : now is within [start_date, end_date]
+ *
+ * This is the ONLY place where status is computed. proposal_status_matches,
+ * all SELECT lists, and cache refresh logic MUST call this function to
+ * determine status. No other file or function may contain a hand-written
+ * CASE expression for proposal status.
+ */
+CREATE OR REPLACE FUNCTION hafbe_backend.get_proposal_status(
+    _start_date TIMESTAMP,
+    _end_date   TIMESTAMP,
+    _removed    BOOLEAN,
+    _now        TIMESTAMP
+)
+RETURNS TEXT
+LANGUAGE 'sql' IMMUTABLE
+AS $$
+  SELECT CASE
+    WHEN _removed             THEN 'removed'
+    WHEN _now > _end_date     THEN 'expired'
+    WHEN _now < _start_date   THEN 'inactive'
+    ELSE                            'active'
+  END;
+$$;
+
+/*
+ * proposal_status_matches: Status filter that delegates to get_proposal_status.
  *
  * Mirrors hived's `proposal_status` enum semantics:
- *   - active:   now is within [start_date, end_date]
- *   - inactive: now is before start_date
- *   - expired:  now is after end_date
- *   - votable:  active OR inactive (i.e. now <= end_date)
- *   - all:      any status, but still excluding `removed = TRUE`
+ *   - active:   get_proposal_status(...) = 'active'
+ *   - inactive: get_proposal_status(...) = 'inactive'
+ *   - expired:  get_proposal_status(...) = 'expired'
+ *   - votable:  get_proposal_status(...) IN ('active', 'inactive')
+ *   - all:      get_proposal_status(...) != 'removed'
  *
  * Removed proposals are NEVER returned by any status filter; they remain in
  * the table only to keep historical joins (votes/payments) intact.
+ *
+ * This function delegates status computation entirely to get_proposal_status,
+ * so there is zero risk of drift between filtering and display logic.
  */
 CREATE OR REPLACE FUNCTION hafbe_backend.proposal_status_matches(
     _status     hafbe_backend.proposal_status,
@@ -142,34 +176,41 @@ CREATE OR REPLACE FUNCTION hafbe_backend.proposal_status_matches(
 RETURNS BOOLEAN
 LANGUAGE 'sql' IMMUTABLE
 AS $$
-  SELECT NOT _removed AND CASE _status
-    WHEN 'all'      THEN TRUE
-    WHEN 'active'   THEN _now >= _start_date AND _now <= _end_date
-    WHEN 'inactive' THEN _now <  _start_date
-    WHEN 'expired'  THEN _now >  _end_date
-    WHEN 'votable'  THEN _now <= _end_date
-  END;
+  SELECT CASE _status
+    WHEN 'all'      THEN s != 'removed'
+    WHEN 'active'   THEN s = 'active'
+    WHEN 'inactive' THEN s = 'inactive'
+    WHEN 'expired'  THEN s = 'expired'
+    WHEN 'votable'  THEN s IN ('active', 'inactive')
+  END
+  FROM hafbe_backend.get_proposal_status(_start_date, _end_date, _removed, _now) s;
 $$;
 
 /*
  * get_proposals_count: Count proposals matching the status and optional filters.
+ *
+ * If _now is provided, it is used as the reference time for status matching;
+ * otherwise the current HAFBE head block timestamp is used. Passing the same
+ * _now to both get_proposals_count and get_proposals ensures consistent
+ * results between the total count and the paginated list.
  */
 CREATE OR REPLACE FUNCTION hafbe_backend.get_proposals_count(
     _status       hafbe_backend.proposal_status,
-    _creator_id   INT   DEFAULT NULL,
-    _proposal_ids INT[] DEFAULT NULL,
-    _voter_id     INT   DEFAULT NULL,
-    _search       TEXT  DEFAULT NULL
+    _creator_id   INT       DEFAULT NULL,
+    _proposal_ids INT[]     DEFAULT NULL,
+    _voter_id     INT       DEFAULT NULL,
+    _search       TEXT      DEFAULT NULL,
+    _now          TIMESTAMP DEFAULT NULL
 )
 RETURNS INT
 LANGUAGE 'plpgsql' STABLE
 AS $$
 DECLARE
-  _now TIMESTAMP := (SELECT created_at FROM hive.blocks_view WHERE num = hafbe_backend.get_hafbe_head_block());
+  __now TIMESTAMP := COALESCE(_now, (SELECT created_at FROM hive.blocks_view WHERE num = hafbe_backend.get_hafbe_head_block()));
 BEGIN
   RETURN COUNT(*)
   FROM hafbe_app.current_proposals cp
-  WHERE hafbe_backend.proposal_status_matches(_status, cp.start_date, cp.end_date, cp.removed, _now)
+  WHERE hafbe_backend.proposal_status_matches(_status, cp.start_date, cp.end_date, cp.removed, __now)
     AND (_creator_id   IS NULL OR cp.creator_id = _creator_id)
     AND (_proposal_ids IS NULL OR cp.proposal_id = ANY(_proposal_ids))
     AND (_search       IS NULL OR cp.subject = _search)
@@ -195,6 +236,11 @@ END $$;
  * paid_amount is a running total column on current_proposals, incremented by
  * process_proposal_pay_op on each DHF payment. proposal_payments stays as an
  * audit ledger but is no longer aggregated per request.
+ *
+ * If _now is provided, it is used as the reference time for status matching;
+ * otherwise the current HAFBE head block timestamp is used. Passing the same
+ * _now to both get_proposals_count and get_proposals ensures consistent
+ * results between the total count and the paginated list.
  */
 CREATE OR REPLACE FUNCTION hafbe_backend.get_proposals(
     _status       hafbe_backend.proposal_status,
@@ -202,10 +248,11 @@ CREATE OR REPLACE FUNCTION hafbe_backend.get_proposals(
     _page_size    INT,
     _sort         hafbe_backend.order_by_proposal,
     _direction    hafbe_backend.sort_direction,
-    _creator_id   INT   DEFAULT NULL,
-    _proposal_ids INT[] DEFAULT NULL,
-    _voter_id     INT   DEFAULT NULL,
-    _search       TEXT  DEFAULT NULL
+    _creator_id   INT       DEFAULT NULL,
+    _proposal_ids INT[]     DEFAULT NULL,
+    _voter_id     INT       DEFAULT NULL,
+    _search       TEXT      DEFAULT NULL,
+    _now          TIMESTAMP DEFAULT NULL
 )
 RETURNS SETOF hafbe_backend.proposal
 LANGUAGE 'plpgsql' STABLE
@@ -220,13 +267,13 @@ SET plan_cache_mode = force_custom_plan
 AS $$
 DECLARE
   __offset INT       := ((_page - 1) * _page_size);
-  _now     TIMESTAMP := (SELECT created_at FROM hive.blocks_view WHERE num = hafbe_backend.get_hafbe_head_block());
+  __now    TIMESTAMP := COALESCE(_now, (SELECT created_at FROM hive.blocks_view WHERE num = hafbe_backend.get_hafbe_head_block()));
 BEGIN
   RETURN QUERY (
     WITH filtered AS (
       SELECT cp.proposal_id, cp.creator_id, cp.start_date, cp.end_date
       FROM hafbe_app.current_proposals cp
-      WHERE hafbe_backend.proposal_status_matches(_status, cp.start_date, cp.end_date, cp.removed, _now)
+      WHERE hafbe_backend.proposal_status_matches(_status, cp.start_date, cp.end_date, cp.removed, __now)
         AND (_creator_id   IS NULL OR cp.creator_id = _creator_id)
         AND (_proposal_ids IS NULL OR cp.proposal_id = ANY(_proposal_ids))
         AND (_search       IS NULL OR cp.subject = _search)
@@ -273,11 +320,7 @@ BEGIN
       COALESCE(vsc.total_votes, 0)::TEXT                                               AS total_votes,
       COALESCE(vsc.voters_num, 0)                                                      AS voters_num,
       cp.paid_amount::TEXT                                                             AS paid_amount,
-      (CASE
-        WHEN _now > cp.end_date   THEN 'expired'
-        WHEN _now < cp.start_date THEN 'inactive'
-        ELSE                            'active'
-      END)::TEXT                                                                       AS status
+      hafbe_backend.get_proposal_status(cp.start_date, cp.end_date, cp.removed, __now) AS status
     FROM limited_set ls
     JOIN hafbe_app.current_proposals      cp  ON cp.proposal_id   = ls.proposal_id
     JOIN hafbe_app.accounts_view          cav ON cav.id           = cp.creator_id
@@ -305,22 +348,28 @@ END $$;
  * get_proposal_votes_count: Count active proposal votes matching the status and optional filters.
  *
  * The status filter applies to the JOINED proposal, not the vote itself.
+ *
+ * If _now is provided, it is used as the reference time for status matching;
+ * otherwise the current HAFBE head block timestamp is used. Passing the same
+ * _now to both get_proposal_votes_count and get_proposal_votes ensures
+ * consistent results between the total count and the paginated list.
  */
 CREATE OR REPLACE FUNCTION hafbe_backend.get_proposal_votes_count(
     _status      hafbe_backend.proposal_status,
-    _proposal_id INT DEFAULT NULL,
-    _voter_id    INT DEFAULT NULL
+    _proposal_id INT       DEFAULT NULL,
+    _voter_id    INT       DEFAULT NULL,
+    _now         TIMESTAMP DEFAULT NULL
 )
 RETURNS INT
 LANGUAGE 'plpgsql' STABLE
 AS $$
 DECLARE
-  _now TIMESTAMP := (SELECT created_at FROM hive.blocks_view WHERE num = hafbe_backend.get_hafbe_head_block());
+  __now TIMESTAMP := COALESCE(_now, (SELECT created_at FROM hive.blocks_view WHERE num = hafbe_backend.get_hafbe_head_block()));
 BEGIN
   RETURN COUNT(*)
   FROM hafbe_app.current_proposal_votes cpv
   JOIN hafbe_app.current_proposals      cp  ON cp.proposal_id = cpv.proposal_id
-  WHERE hafbe_backend.proposal_status_matches(_status, cp.start_date, cp.end_date, cp.removed, _now)
+  WHERE hafbe_backend.proposal_status_matches(_status, cp.start_date, cp.end_date, cp.removed, __now)
     AND (_proposal_id IS NULL OR cpv.proposal_id = _proposal_id)
     AND (_voter_id    IS NULL OR cpv.voter_id    = _voter_id);
 END $$;
@@ -337,6 +386,11 @@ END $$;
  * (their stake counts through the proxy, not through this direct vote).
  *
  * Status filter applies to the joined proposal, not the vote.
+ *
+ * If _now is provided, it is used as the reference time for status matching;
+ * otherwise the current HAFBE head block timestamp is used. Passing the same
+ * _now to both get_proposal_votes_count and get_proposal_votes ensures
+ * consistent results between the total count and the paginated list.
  */
 CREATE OR REPLACE FUNCTION hafbe_backend.get_proposal_votes(
     _status      hafbe_backend.proposal_status,
@@ -344,8 +398,9 @@ CREATE OR REPLACE FUNCTION hafbe_backend.get_proposal_votes(
     _page_size   INT,
     _sort        hafbe_backend.order_by_proposal_vote,
     _direction   hafbe_backend.sort_direction,
-    _proposal_id INT DEFAULT NULL,
-    _voter_id    INT DEFAULT NULL
+    _proposal_id INT       DEFAULT NULL,
+    _voter_id    INT       DEFAULT NULL,
+    _now         TIMESTAMP DEFAULT NULL
 )
 RETURNS SETOF hafbe_backend.proposal_vote
 LANGUAGE 'plpgsql' STABLE
@@ -357,14 +412,14 @@ SET plan_cache_mode = force_custom_plan
 AS $$
 DECLARE
   __offset INT       := ((_page - 1) * _page_size);
-  _now     TIMESTAMP := (SELECT created_at FROM hive.blocks_view WHERE num = hafbe_backend.get_hafbe_head_block());
+  __now    TIMESTAMP := COALESCE(_now, (SELECT created_at FROM hive.blocks_view WHERE num = hafbe_backend.get_hafbe_head_block()));
 BEGIN
   RETURN QUERY (
     WITH limited_set AS MATERIALIZED (
       SELECT cpv.voter_id, cpv.proposal_id, cpv.source_op
       FROM hafbe_app.current_proposal_votes cpv
       JOIN hafbe_app.current_proposals      cp  ON cp.proposal_id = cpv.proposal_id
-      WHERE hafbe_backend.proposal_status_matches(_status, cp.start_date, cp.end_date, cp.removed, _now)
+      WHERE hafbe_backend.proposal_status_matches(_status, cp.start_date, cp.end_date, cp.removed, __now)
         AND (_proposal_id IS NULL OR cpv.proposal_id = _proposal_id)
         AND (_voter_id    IS NULL OR cpv.voter_id    = _voter_id)
       ORDER BY
@@ -394,11 +449,7 @@ BEGIN
         COALESCE(vsc.total_votes, 0)::TEXT,
         COALESCE(vsc.voters_num, 0),
         cp.paid_amount::TEXT,
-        (CASE
-          WHEN _now > cp.end_date   THEN 'expired'
-          WHEN _now < cp.start_date THEN 'inactive'
-          ELSE                            'active'
-        END)::TEXT
+        hafbe_backend.get_proposal_status(cp.start_date, cp.end_date, cp.removed, __now)
       )::hafbe_backend.proposal AS proposal,
       (CASE
         WHEN cap.account_id IS NOT NULL THEN '0'

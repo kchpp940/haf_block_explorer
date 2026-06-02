@@ -30,7 +30,6 @@ tags:
     description: General API information
 servers:
   - url: /hafbe-api
-# Note: The actual server URL is configured at runtime via custom.hafbe_api_base_path setting
  */
 
 CREATE SCHEMA IF NOT EXISTS hafbe_endpoints AUTHORIZATION hafbe_owner;
@@ -39,20 +38,8 @@ CREATE SCHEMA IF NOT EXISTS hafbe_backend   AUTHORIZATION hafbe_owner;
 DO $__$
 DECLARE
   swagger_url TEXT;
-  hafbe_api_base_path TEXT;
 BEGIN
   swagger_url := current_setting('custom.swagger_url')::TEXT;
-
-  -- Get API base path from configuration, default to /hafbe-api
-  BEGIN
-    hafbe_api_base_path := current_setting('custom.hafbe_api_base_path')::TEXT;
-  EXCEPTION
-    WHEN OTHERS THEN
-      hafbe_api_base_path := '/hafbe-api';
-  END;
-
-  -- Ensure base path starts with / and has no trailing /
-  hafbe_api_base_path := '/' || regexp_replace(regexp_replace(hafbe_api_base_path, '^/', ''), '/$', '');
 
 EXECUTE FORMAT(
 'create or replace function hafbe_endpoints.root() returns json as $_$
@@ -103,7 +90,7 @@ declare
   ],
   "servers": [
     {
-      "url": %L
+      "url": "/hafbe-api"
     }
   ],
   "components": {
@@ -3123,7 +3110,7 @@ begin
   return openapi;
 end
 $_$ language plpgsql;'
-, hafbe_api_base_path, swagger_url);
+, swagger_url);
 
 END
 $__$;

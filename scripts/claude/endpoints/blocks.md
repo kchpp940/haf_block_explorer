@@ -57,19 +57,19 @@ Returns `hafbe_backend.block_history`:
 
 ```bash
 # Get latest 5 blocks
-curl "http://localhost:8080/hafbe-api/block-search?page-size=5"
+curl "http://localhost:3000/hafbe-api/block-search?page-size=5"
 
 # Filter by operation type (vote operations = type 0)
-curl "http://localhost:8080/hafbe-api/block-search?operation-types=0&page-size=10"
+curl "http://localhost:3000/hafbe-api/block-search?operation-types=0&page-size=10"
 
 # Filter by account and block range
-curl "http://localhost:8080/hafbe-api/block-search?account-name=blocktrades&from-block=4000000&to-block=5000000"
+curl "http://localhost:3000/hafbe-api/block-search?account-name=blocktrades&from-block=4000000&to-block=5000000"
 
 # Filter by timestamp range
-curl "http://localhost:8080/hafbe-api/block-search?from-block=2016-09-01%2000:00:00&to-block=2016-09-15%2023:59:59"
+curl "http://localhost:3000/hafbe-api/block-search?from-block=2016-09-01%2000:00:00&to-block=2016-09-15%2023:59:59"
 
 # Use path filter (requires extra indexes)
-curl "http://localhost:8080/hafbe-api/block-search?operation-types=78&path-filter=value.creator=alpha"
+curl "http://localhost:3000/hafbe-api/block-search?operation-types=78&path-filter=value.creator=alpha"
 ```
 
 ## Implementation Details

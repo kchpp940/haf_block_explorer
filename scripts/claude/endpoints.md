@@ -331,13 +331,8 @@ rewrite ^/hafbe-api/your-path$ /hafbe-api/rpc/your_function break;
 # Apply changes
 ./scripts/install_app.sh --host=<db_host>
 
-# Test via nginx rewriter (unified entry point, port 8080 with /hafbe-api prefix)
-curl "http://localhost:8080/hafbe-api/your-endpoint"
-
-# Or direct RPC call through rewriter
-curl -X POST "http://localhost:8080/hafbe-api/rpc/your_function" \
-  -H "Content-Type: application/json" \
-  -d '{"param-name": "value"}'
+# Test endpoint
+curl "http://localhost:3000/rpc/your_function?param-name=value"
 ```
 
 ## Expansion Rules

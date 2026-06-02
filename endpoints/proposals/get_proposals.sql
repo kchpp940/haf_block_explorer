@@ -155,6 +155,7 @@ DECLARE
                                    WHERE trim(x) <> ''
                                  ))
                          END;
+  _now          TIMESTAMP := (SELECT created_at FROM hive.blocks_view WHERE num = hafbe_backend.get_hafbe_head_block());
 BEGIN
   PERFORM hafbe_backend.validate_limit("page-size", 1000);
   PERFORM hafbe_backend.validate_negative_limit("page-size");
@@ -162,7 +163,7 @@ BEGIN
 
   PERFORM set_config('response.headers', '[{"Cache-Control": "public, max-age=2"}]', true);
 
-  _ops_count   := hafbe_backend.get_proposals_count("status", _creator_id, _proposal_ids, _voter_id, "search");
+  _ops_count   := hafbe_backend.get_proposals_count("status", _creator_id, _proposal_ids, _voter_id, "search", _now);
   _total_pages := hafah_backend.total_pages(_ops_count, "page-size");
 
   PERFORM hafbe_backend.validate_page("page", _total_pages);
@@ -191,7 +192,8 @@ BEGIN
       _creator_id,
       _proposal_ids,
       _voter_id,
-      "search"
+      "search",
+      _now
     ) ba
   ) row;
 

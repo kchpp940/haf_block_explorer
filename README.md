@@ -170,45 +170,26 @@ Use `./scripts/process_blocks.sh --help` for options including:
 
 ### Access the API
 
-The API is always available through the nginx rewriter on port 8080 with the `/hafbe-api` prefix (configurable via `HAFBE_API_BASE_PATH` environment variable):
+Once PostgREST is running (default port 3000), access endpoints like:
 
 ```bash
-# REST-style endpoints
-curl "http://localhost:8080/hafbe-api/accounts/hiveio"
-curl "http://localhost:8080/hafbe-api/block-search?page-size=5"
-curl "http://localhost:8080/hafbe-api/witnesses/blocktrades"
+# Get account info
+curl "http://localhost:3000/rpc/get_account?_account_name=hiveio"
 
-# Direct RPC calls (also through rewriter)
-curl -X POST "http://localhost:8080/hafbe-api/rpc/get_account" \
-  -H "Content-Type: application/json" \
-  -d '{"account-name": "hiveio"}'
+# Search blocks
+curl "http://localhost:3000/rpc/get_block?_block_num=1000000"
+
+# Get witness data
+curl "http://localhost:3000/rpc/get_witness?_witness_name=blocktrades"
 ```
-
-**Base Path Configuration**: Set `HAFBE_API_BASE_PATH` environment variable to customize the API prefix (default: `/hafbe-api`).
 
 ### Docker Deployment
 
 ```bash
 cd docker
-docker compose up -d                        # Start all services (API on port 8080)
-docker compose --profile swagger up -d      # Include Swagger UI (port 8081)
+docker compose up -d                        # Start all services
+docker compose --profile swagger up -d      # Include Swagger UI (port 8080)
 docker compose --profile db-tools up -d     # Include PgAdmin/PgHero
-```
-
-**Ports:**
-- API: `http://localhost:8080/hafbe-api/` (via nginx rewriter)
-- Swagger UI: `http://localhost:8081/` (with `--profile swagger`)
-
-**Environment Variables:**
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `HAFBE_API_BASE_PATH` | `/hafbe-api` | API URL path prefix |
-| `REWRITE_LOG` | `off` | Enable nginx rewrite logging (`on`/`off`) |
-
-```bash
-# Custom API base path example
-HAFBE_API_BASE_PATH=/api docker compose up -d
-curl "http://localhost:8080/api/accounts/blocktrades"
 ```
 
 See [docker/README.md](docker/README.md) for detailed Docker instructions.

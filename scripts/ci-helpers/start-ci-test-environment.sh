@@ -15,7 +15,6 @@ OPTIONS:
     --haf-registry=REGISTRY     HAF registry to use (default: registry.gitlab.syncad.com/hive/haf)
     --haf-version=VERSION       HAF version to use (default: 9ec94375)
     --setup-uid=UID             UID that HAF setup should be run as (default: $(id -u))
-    --api-base-path=PATH        API base path (default: /hafbe-api)
     --help|-h|-?                Display this help screen and exit
 EOF
 }
@@ -44,10 +43,6 @@ while [ $# -gt 0 ]; do
         arg="${1#*=}"
         SETUP_UID="$arg"
         ;;
-    --api-base-path=*)
-        arg="${1#*=}"
-        HAFBE_API_BASE_PATH="$arg"
-        ;;
     --help|-h|-\?)
         print_help
         exit 0
@@ -74,7 +69,6 @@ cat <<-EOF | tee ci.env
     HAF_REGISTRY=${HAF_REGISTRY_PATH:-registry.gitlab.syncad.com/hive/haf}
     HAF_VERSION=${HAF_REGISTRY_TAG:-9ec94375}
     SETUP_UID=${SETUP_UID:-$(id -u)}
-    HAFBE_API_BASE_PATH=${HAFBE_API_BASE_PATH:-/hafbe-api}
     PGHERO_USERNAME=link
     PGHERO_PASSWORD=hyrule
     PGADMIN_DEFAULT_EMAIL=admin@hafblockexplorer.internal
