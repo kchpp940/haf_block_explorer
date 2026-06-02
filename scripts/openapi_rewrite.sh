@@ -39,6 +39,7 @@ ENDPOINTS_IN_ORDER="
 ../$endpoints/accounts/get_account.sql
 ../$endpoints/accounts/get_account_authority.sql
 ../$endpoints/accounts/get_account_proxies_power.sql
+../$endpoints/accounts/get_account_activity_summary.sql
 ../$endpoints/accounts/get_comment_permlinks.sql
 ../$endpoints/accounts/get_comment_operations.sql
 ../$endpoints/accounts/get_total_wallet_addresses.sql

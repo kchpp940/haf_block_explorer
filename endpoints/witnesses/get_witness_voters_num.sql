@@ -50,19 +50,12 @@ DECLARE
   _witness_id INT := hafbe_backend.get_witness_id("account-name");
 BEGIN
   PERFORM set_config('response.headers', '[{"Cache-Control": "public, max-age=2"}]', true);
-
   RETURN COALESCE(
     (
-      SELECT voters_num
-      FROM hafbe_app.witness_votes_cache
+      SELECT COUNT(*) 
+      FROM hafbe_backend.current_witness_votes_view 
       WHERE witness_id = _witness_id
-    ),
-    (
-      SELECT COUNT(*)
-      FROM hafbe_backend.witness_current_votes_resolved_view
-      WHERE witness_id = _witness_id
-    ),
-    0
+    ), 0
   );
 END
 $$;

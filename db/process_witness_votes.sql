@@ -191,20 +191,18 @@ BEGIN
    * Cache 2: Witness Votes
    * ===================================================================================
    * Caches total vote weight and voter count per witness.
-   *
-   * Uses witness_current_votes_resolved_view as the SINGLE source of truth
-   * for voter vest resolution. This guarantees the cache matches exactly what
-   * get_witness_voters() and get_witness_voters_num() would return.
+   * Uses the account_vest_stats_cache we just populated.
    */
   DELETE FROM hafbe_app.witness_votes_cache;
 
   INSERT INTO hafbe_app.witness_votes_cache (witness_id, votes, voters_num)
   SELECT
-    rv.witness_id,
-    SUM(rv.vests)::BIGINT AS votes,
-    COUNT(*)              AS voters_num
-  FROM hafbe_backend.witness_current_votes_resolved_view rv
-  GROUP BY rv.witness_id;
+    cwv.witness_id,
+    SUM(avs.vests)::BIGINT AS votes,
+    COUNT(*)               AS voters_num
+  FROM hafbe_backend.current_witness_votes_view cwv
+  JOIN hafbe_app.account_vest_stats_cache avs ON avs.account_id = cwv.voter_id
+  GROUP BY cwv.witness_id;
 
 
   /*
@@ -239,20 +237,22 @@ BEGIN
    * Caches the change in votes and voters for each witness since start of today.
    * Used for "24h change" statistics in the API.
    *
-   * Uses witness_votes_history_resolved_view as the SINGLE source of truth
-   * for voter vest resolution. This guarantees daily change calculations match
-   * exactly what get_witness_votes_history() would return for the same period.
+   * Calculation:
+   *   - Positive vests for approve=TRUE votes
+   *   - Negative vests for approve=FALSE votes
+   *   - Sum gives net change in vote weight
    */
   DELETE FROM hafbe_app.witness_votes_change_cache;
 
   INSERT INTO hafbe_app.witness_votes_change_cache (witness_id, votes_daily_change, voters_num_daily_change)
   SELECT
-    rv.witness_id,
-    SUM(CASE WHEN rv.approve THEN rv.vests ELSE -rv.vests END)::BIGINT AS votes_daily_change,
-    SUM(CASE WHEN rv.approve THEN 1 ELSE -1 END)::INT                  AS voters_num_daily_change
-  FROM hafbe_backend.witness_votes_history_resolved_view rv
-  WHERE rv.source_op_block >= _first_block_num
-  GROUP BY rv.witness_id;
+    wvhc.witness_id,
+    SUM(CASE WHEN wvhc.approve THEN avs.vests ELSE -1 * avs.vests END)::BIGINT AS votes_daily_change,
+    SUM(CASE WHEN wvhc.approve THEN 1 ELSE -1 END)::INT                        AS voters_num_daily_change
+  FROM hafbe_backend.witness_votes_history_view wvhc
+  JOIN hafbe_app.account_vest_stats_cache avs ON avs.account_id = wvhc.voter_id
+  WHERE wvhc.source_op_block >= _first_block_num
+  GROUP BY wvhc.witness_id;
 
 END
 $$;
