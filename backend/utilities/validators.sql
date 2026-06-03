@@ -17,6 +17,72 @@ SET ROLE hafbe_owner;
 -- ============================================================================
 
 -- ============================================================================
+-- Cursor Pagination Validators
+-- ============================================================================
+
+/*
+ * validate_cursor_page_exclusive: Validates that cursor and page are not
+ * both provided at the same time.
+ *
+ * Mixing cursor-based and page-based pagination is not allowed because
+ * they use fundamentally different offset mechanisms. When cursor is
+ * provided, page is ignored, which can lead to unexpected results.
+ *
+ * PARAMETERS:
+ *   _cursor - The cursor string (may be NULL or empty)
+ *   _page   - The page number (may be NULL)
+ *
+ * RAISES: Exception if both cursor and page are provided
+ */
+CREATE OR REPLACE FUNCTION hafbe_backend.validate_cursor_page_exclusive(
+    _cursor TEXT,
+    _page   INT
+)
+RETURNS VOID
+LANGUAGE 'plpgsql'
+IMMUTABLE
+AS
+$$
+BEGIN
+  IF _cursor IS NOT NULL AND _cursor != '' AND _page IS NOT NULL THEN
+    RAISE EXCEPTION 'Cannot use both cursor and page parameters. Use cursor for cursor-based pagination or page for page-based pagination, not both.';
+  END IF;
+END
+$$;
+
+/*
+ * validate_cursor_limit_page_size: Validates that when cursor is provided,
+ * page-size is not also provided (limit should be used instead).
+ *
+ * When using cursor pagination, the limit parameter should be used instead
+ * of page-size to avoid ambiguity about which value takes precedence.
+ *
+ * PARAMETERS:
+ *   _cursor    - The cursor string (may be NULL or empty)
+ *   _limit     - The limit value provided (may be NULL if not specified)
+ *   _page_size - The page-size value provided (may be NULL if not specified)
+ *
+ * RAISES: Exception if cursor is provided along with page-size
+ */
+CREATE OR REPLACE FUNCTION hafbe_backend.validate_cursor_limit_page_size(
+    _cursor    TEXT,
+    _limit     INT,
+    _page_size INT
+)
+RETURNS VOID
+LANGUAGE 'plpgsql'
+IMMUTABLE
+AS
+$$
+BEGIN
+  IF _cursor IS NOT NULL AND _cursor != '' AND _page_size IS NOT NULL AND _limit IS NOT NULL AND _limit != _page_size THEN
+    RAISE EXCEPTION 'Cannot specify both limit (%) and page-size (%) with cursor pagination. Use only limit when using cursor, or only page-size when using page-based pagination.',
+      _limit, _page_size;
+  END IF;
+END
+$$;
+
+-- ============================================================================
 -- Pagination Validators
 -- ============================================================================
 

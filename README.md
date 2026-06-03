@@ -411,27 +411,61 @@ Response:
 
 #### Search Blocks by Operation Type
 
+**Basic search with page-based pagination:**
 ```bash
 curl "http://localhost:3000/hafbe-api/block-search?operation-types=0&page-size=5"
 ```
 
-Response:
+**Cursor-based pagination (Recommended for deep pagination):**
+```bash
+# First page
+curl "http://localhost:3000/hafbe-api/block-search?operation-types=0&limit=5"
+
+# Next page using the next_cursor from previous response
+curl "http://localhost:3000/hafbe-api/block-search?operation-types=0&limit=5&cursor=eyJ2IjoxLCJiIjo1MDAwMDAwLCJkIjoiZGVzYyJ9"
+```
+
+**Response with cursor pagination:**
 ```json
 {
   "total_blocks": 5000000,
   "total_pages": 1000000,
+  "block_range": {
+    "from": 1,
+    "to": 5000000
+  },
+  "next_cursor": "eyJ2IjoyLCJiIjo0OTk5OTk2LCJvIjoxMjM0NTY3ODkwLCJkIjoiZGVzYyIsInMiOm51bGwsImgiOm51bGx9",
+  "has_more": true,
   "blocks_result": [
     {
       "block_num": 5000000,
       "created_at": "2016-09-15T19:47:21",
       "producer_account": "ihashfury",
+      "producer_reward": "3003845513",
+      "trx_count": 2,
+      "hash": "004c4b40245ffb07380a393fb2b3d841b76cdaec",
+      "prev": "004c4b3fc6a8735b4ab5433d59f4526e4a042644",
       "operations": [
         {"op_type_id": 0, "op_count": 2}
+      ]
+    },
+    {
+      "block_num": 4999999,
+      "created_at": "2016-09-15T19:47:18",
+      "producer_account": "smooth.witness",
+      "operations": [
+        {"op_type_id": 0, "op_count": 1},
+        {"op_type_id": 6, "op_count": 2}
       ]
     }
   ]
 }
 ```
+
+**Pagination Comparison:**
+- **Cursor-based** (`cursor` + `limit`): O(limit) performance, suitable for deep pagination
+- **Page-based** (`page` + `page-size`): O(page * limit) performance, good for first 10 pages
+- **Priority**: When both `cursor` and `page` are provided, `cursor` takes precedence
 
 #### Get Witness Information
 

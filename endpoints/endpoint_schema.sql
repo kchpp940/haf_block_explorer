@@ -260,6 +260,14 @@ declare
             "$ref": "#/components/schemas/hafbe_backend.block_range",
             "description": "Range of blocks that contains the returned pages"
           },
+          "next_cursor": {
+            "type": "string",
+            "description": "Encoded cursor for next page of results. Use this in the `cursor` parameter for the next request. NULL means no more results. Uses stable composite sort keys (block_num + operation_id for non-account queries, account_op_seq_no for account queries) to avoid skipping or duplicating results when multiple operations exist in the same block."
+          },
+          "has_more": {
+            "type": "boolean",
+            "description": "Whether there are more results available after this page"
+          },
           "blocks_result": {
             "type": "array",
             "items": {
@@ -2183,7 +2191,8 @@ declare
           "Block-search"
         ],
         "summary": "List block stats that match operation type filter, account name, and time/block range.",
-        "description": "List the block stats that match given operation type filter,\naccount name and time/block range in specified order\n\nSQL example\n* `SELECT * FROM hafbe_endpoints.get_block_by_op(NULL,NULL,NULL,5);`\n\nREST call example\n* `GET ''https://%1$s/hafbe-api/block-search?page-size=5''`\n",
+        "description": "List the block stats that match given operation type filter,\naccount name and time/block range in specified order.\n\n**Cursor Pagination (Recommended):**\nUse `cursor` and `limit` parameters for efficient deep pagination.\nThe response includes a `next_cursor` field that you can pass to the\nnext request to fetch the next page.\n\n**Page-based Pagination (Legacy):**\nUse `page` and `page-size` for simple pagination. Not recommended for\ndeep pagination (page > 10) due to performance considerations.\n\n**Pagination Priority:**\nIf `cursor` is provided, it takes precedence over `page`.\n\nSQL example\n* `SELECT * FROM hafbe_endpoints.get_block_by_op(_limit => 5);`\n\nREST call example\n* `GET ''https://%1$s/hafbe-api/block-search?limit=5''`\n\nCursor pagination example
+* `GET ''https://%1$s/hafbe-api/block-search?limit=5&cursor=eyJ2IjoyLCJiIjo1MDAwMDAwLCJvIjoxMjM0NTY3ODkwLCJkIjoiZGVzYyIsInMiOm51bGwsImgiOm51bGx9''`\n",
         "operationId": "hafbe_endpoints.get_block_by_op",
         "parameters": [
           {
@@ -2208,13 +2217,33 @@ declare
           },
           {
             "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": null
+            },
+            "description": "Cursor for pagination. Use the `next_cursor` value from the previous\nresponse to fetch the next page. When provided, this takes precedence\nover the `page` parameter. The cursor is opaque (base64-encoded JSON)\nand contains the state needed to resume pagination efficiently, including\nstable composite sort keys to avoid skipping or duplicating results.\nSupports both v1 (block_num only) and v2 (block_num + operation_id) formats.\n"
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 100
+            },
+            "description": "Maximum number of blocks to return per request when using cursor\npagination. Defaults to `100`. This is equivalent to `page-size`\nand either parameter can be used interchangeably.\n"
+          },
+          {
+            "in": "query",
             "name": "page",
             "required": false,
             "schema": {
               "type": "integer",
               "default": null
             },
-            "description": "Return page on `page` number, defaults to `NULL`"
+            "description": "Page number (1-based) for page-based pagination. Not used when\n`cursor` is provided. Defaults to `NULL`\n"
           },
           {
             "in": "query",
@@ -2224,7 +2253,7 @@ declare
               "type": "integer",
               "default": 100
             },
-            "description": "Return max `page-size` operations per page, defaults to `100`"
+            "description": "Maximum number of blocks per page for page-based pagination.\nDefaults to `100`. Same as `limit` parameter.\n"
           },
           {
             "in": "query",
@@ -2286,6 +2315,8 @@ declare
                     "from": 1,
                     "to": 5000000
                   },
+                  "next_cursor": "eyJ2IjoyLCJiIjo0OTk5OTk2LCJvIjoxMjM0NTY3ODkwLCJkIjoiZGVzYyIsInMiOm51bGwsImgiOm51bGx9",
+                  "has_more": true,
                   "blocks_result": [
                     {
                       "block_num": 5000000,

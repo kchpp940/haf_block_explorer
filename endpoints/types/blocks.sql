@@ -112,6 +112,14 @@ hafbe_backend.block_history:
       items:
         $ref: '#/components/schemas/hafbe_backend.blocksearch'
       description: List of block results
+    next_cursor:
+      type: string
+      description: >-
+        Encoded cursor for next page of results. Use this in the `cursor`
+        parameter for the next request. NULL means no more results.
+    has_more:
+      type: boolean
+      description: Whether there are more results available after this page
  */
 -- openapi-generated-code-begin
 DROP TYPE IF EXISTS hafbe_backend.block_history CASCADE;
@@ -119,7 +127,9 @@ CREATE TYPE hafbe_backend.block_history AS (
     "total_blocks" INT,
     "total_pages" INT,
     "block_range" hafbe_backend.block_range,
-    "blocks_result" hafbe_backend.blocksearch[]
+    "blocks_result" hafbe_backend.blocksearch[],
+    "next_cursor" TEXT,
+    "has_more" BOOLEAN
 );
 -- openapi-generated-code-end
 

@@ -6,6 +6,9 @@ SET ROLE hafbe_owner;
  * Routes to the appropriate gatherer based on filter parameters, then enriches
  * the results using the shared blocksearch_build_result function.
  *
+ * Supports both page-based and cursor-based pagination. When cursor is provided,
+ * it takes precedence over page parameters for better performance with deep pagination.
+ *
  * DESIGN:
  *   1. Single CASE statement routes to the appropriate gatherer
  *   2. All gatherers return gatherer_result (intermediate type)
@@ -27,12 +30,13 @@ SET ROLE hafbe_owner;
  *   _order_is    - Sort direction ('asc' or 'desc')
  *   _from        - Starting block (NULL = genesis)
  *   _to          - Ending block (NULL = current head)
- *   _page        - Page number (1-based)
+ *   _page        - Page number (1-based, used if cursor is NULL)
  *   _limit       - Page size
  *   _key_content - Array of values to match for key-value filter
  *   _setof_keys  - JSON array of paths for key-value filter
+ *   _cursor_str  - Base64-encoded cursor string for pagination
  *
- * RETURNS: block_history with enriched block data
+ * RETURNS: block_history with enriched block data and next_cursor
  */
 CREATE OR REPLACE FUNCTION hafbe_backend.get_blocks_by_ops(
     _operations  INT[],
@@ -43,7 +47,8 @@ CREATE OR REPLACE FUNCTION hafbe_backend.get_blocks_by_ops(
     _page        INT,
     _limit       INT,
     _key_content TEXT[],
-    _setof_keys  JSON
+    _setof_keys  JSON,
+    _cursor_str  TEXT = NULL
 )
 RETURNS hafbe_backend.block_history
 LANGUAGE 'plpgsql' STABLE
@@ -55,40 +60,67 @@ DECLARE
   __filter_by_single   BOOLEAN := (_operations IS NOT NULL AND array_length(_operations, 1) = 1);
   __filter_by_account  BOOLEAN := (_account IS NOT NULL);
   __filter_by_key      BOOLEAN := (_key_content[1] IS NOT NULL);
+  __cursor             hafbe_backend.blocksearch_cursor;
+  __filter_hash        TEXT;
 BEGIN
+  -- Decode cursor if provided
+  IF _cursor_str IS NOT NULL AND _cursor_str != '' THEN
+    __cursor := hafbe_backend.blocksearch_decode_cursor(_cursor_str);
+  END IF;
+
+  -- Calculate filter hash for cursor validation
+  __filter_hash := hafbe_backend.blocksearch_calculate_filter_hash(
+    _operations,
+    _account,
+    _key_content,
+    _from,
+    _to
+  );
+
+  -- Validate cursor if provided
+  IF __cursor IS NOT NULL THEN
+    PERFORM hafbe_backend.blocksearch_validate_cursor(
+      __cursor,
+      _order_is,
+      __filter_hash,
+      COALESCE(_from, hafbe_backend.genesis_block_num()),
+      COALESCE(_to, (SELECT current_block_num FROM hafd.contexts WHERE name = 'hafbe_app'))
+    );
+  END IF;
+
   -- Route to appropriate gatherer (single CASE statement)
   __gathered := CASE
     -- 1. No filter
     WHEN NOT __filter_by_op AND NOT __filter_by_account AND NOT __filter_by_key THEN
-      hafbe_backend.blocksearch_no_filter(_from, _to, _order_is, _page, _limit)
+      hafbe_backend.blocksearch_no_filter(_from, _to, _order_is, _page, _limit, __cursor, __filter_hash)
 
     -- 2. Single operation only
     WHEN __filter_by_single AND NOT __filter_by_account AND NOT __filter_by_key THEN
-      hafbe_backend.blocksearch_single_op(_operations[1], _from, _to, _order_is, _page, _limit)
+      hafbe_backend.blocksearch_single_op(_operations[1], _from, _to, _order_is, _page, _limit, __cursor, __filter_hash)
 
     -- 3. Multiple operations only
     WHEN __filter_by_op AND NOT __filter_by_single AND NOT __filter_by_account AND NOT __filter_by_key THEN
-      hafbe_backend.blocksearch_multi_op(_operations, _from, _to, _order_is, _page, _limit)
+      hafbe_backend.blocksearch_multi_op(_operations, _from, _to, _order_is, _page, _limit, __cursor, __filter_hash)
 
     -- 4. Single operation + key-value filter
     WHEN __filter_by_single AND NOT __filter_by_account AND __filter_by_key THEN
-      hafbe_backend.blocksearch_key_value(_operations[1], _from, _to, _order_is, _page, _limit, _key_content, _setof_keys)
+      hafbe_backend.blocksearch_key_value(_operations[1], _from, _to, _order_is, _page, _limit, _key_content, _setof_keys, __cursor, __filter_hash)
 
     -- 5. Account only
     WHEN NOT __filter_by_op AND __filter_by_account AND NOT __filter_by_key THEN
-      hafbe_backend.blocksearch_account(_account, _from, _to, _order_is, _page, _limit)
+      hafbe_backend.blocksearch_account(_account, _from, _to, _order_is, _page, _limit, __cursor, __filter_hash)
 
     -- 6. Account + single operation
     WHEN __filter_by_single AND __filter_by_account AND NOT __filter_by_key THEN
-      hafbe_backend.blocksearch_account_op(_operations[1], _account, _from, _to, _order_is, _page, _limit)
+      hafbe_backend.blocksearch_account_op(_operations[1], _account, _from, _to, _order_is, _page, _limit, __cursor, __filter_hash)
 
     -- 7. Account + multiple operations
     WHEN __filter_by_op AND NOT __filter_by_single AND __filter_by_account AND NOT __filter_by_key THEN
-      hafbe_backend.blocksearch_account_multi_op(_operations, _account, _from, _to, _order_is, _page, _limit)
+      hafbe_backend.blocksearch_account_multi_op(_operations, _account, _from, _to, _order_is, _page, _limit, __cursor, __filter_hash)
 
     -- 8. Account + single operation + key-value filter
     WHEN __filter_by_single AND __filter_by_account AND __filter_by_key THEN
-      hafbe_backend.blocksearch_account_key_value(_operations[1], _account, _from, _to, _order_is, _page, _limit, _key_content, _setof_keys)
+      hafbe_backend.blocksearch_account_key_value(_operations[1], _account, _from, _to, _order_is, _page, _limit, _key_content, _setof_keys, __cursor, __filter_hash)
 
     ELSE
       NULL

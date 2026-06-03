@@ -8,13 +8,28 @@ SET ROLE hafbe_owner;
     summary: List block stats that match operation type filter, account name, and time/block range.
     description: |
       List the block stats that match given operation type filter,
-      account name and time/block range in specified order
+      account name and time/block range in specified order.
+
+      **Cursor Pagination (Recommended):**
+      Use `cursor` and `limit` parameters for efficient deep pagination.
+      The response includes a `next_cursor` field that you can pass to the
+      next request to fetch the next page.
+
+      **Page-based Pagination (Legacy):**
+      Use `page` and `page-size` for simple pagination. Not recommended for
+      deep pagination (page > 10) due to performance considerations.
+
+      **Pagination Priority:**
+      If `cursor` is provided, it takes precedence over `page`.
 
       SQL example
-      * `SELECT * FROM hafbe_endpoints.get_block_by_op(NULL,NULL,NULL,5);`
+      * `SELECT * FROM hafbe_endpoints.get_block_by_op(_limit => 5);`
 
       REST call example
-      * `GET ''https://%1$s/hafbe-api/block-search?page-size=5''`
+      * `GET ''https://%1$s/hafbe-api/block-search?limit=5''`
+
+      Cursor pagination example
+      * `GET ''https://%1$s/hafbe-api/block-search?limit=5&cursor=eyJ2IjoyLCJiIjo1MDAwMDAwLCJvIjoxMjM0NTY3ODkwLCJkIjoiZGVzYyIsInMiOm51bGwsImgiOm51bGx9''`
     operationId: hafbe_endpoints.get_block_by_op
     parameters:
       - in: query
@@ -34,19 +49,44 @@ SET ROLE hafbe_owner;
           default: NULL
         description: Filter operations by the account that created them.
       - in: query
+        name: cursor
+        required: false
+        schema:
+          type: string
+          default: NULL
+        description: |
+          Cursor for pagination. Use the `next_cursor` value from the previous
+          response to fetch the next page. When provided, this takes precedence
+          over the `page` parameter. The cursor is opaque (base64-encoded JSON)
+          and contains the state needed to resume pagination efficiently.
+      - in: query
+        name: limit
+        required: false
+        schema:
+          type: integer
+          default: 100
+        description: |
+          Maximum number of blocks to return per request when using cursor
+          pagination. Defaults to `100`. This is equivalent to `page-size`
+          and either parameter can be used interchangeably.
+      - in: query
         name: page
         required: false
         schema:
           type: integer
           default: NULL
-        description: Return page on `page` number, defaults to `NULL`
+        description: |
+          Page number (1-based) for page-based pagination. Not used when
+          `cursor` is provided. Defaults to `NULL`
       - in: query
         name: page-size
         required: false
         schema:
           type: integer
           default: 100
-        description: Return max `page-size` operations per page, defaults to `100`
+        description: |
+          Maximum number of blocks per page for page-based pagination.
+          Defaults to `100`. Same as `limit` parameter.
       - in: query
         name: direction
         required: false
@@ -122,6 +162,8 @@ SET ROLE hafbe_owner;
                 "from": 1,
                 "to": 5000000
               },
+              "next_cursor": "eyJ2IjoxLCJiIjo0OTk5OTk2LCJkIjoiZGVzYyJ9",
+              "has_more": true,
               "blocks_result": [
                 {
                   "block_num": 5000000,
@@ -284,6 +326,8 @@ DROP FUNCTION IF EXISTS hafbe_endpoints.get_block_by_op;
 CREATE OR REPLACE FUNCTION hafbe_endpoints.get_block_by_op(
     "operation-types" TEXT = NULL,
     "account-name" TEXT = NULL,
+    "cursor" TEXT = NULL,
+    "limit" INT = 100,
     "page" INT = NULL,
     "page-size" INT = 100,
     "direction" hafbe_backend.sort_direction = 'desc',
@@ -306,15 +350,25 @@ DECLARE
 
   _key_content TEXT[]               := NULL;
   _set_of_keys JSON                 := NULL;
+  _effective_limit INT;
+  _has_cursor BOOLEAN               := ("cursor" IS NOT NULL AND "cursor" != '');
 BEGIN
-  PERFORM hafbe_backend.validate_limit("page-size", 1000);
-  PERFORM hafbe_backend.validate_negative_limit("page-size");
+  PERFORM hafbe_backend.blocksearch_validate_cursor_format("cursor");
+  PERFORM hafbe_backend.validate_cursor_page_exclusive("cursor", "page");
+  PERFORM hafbe_backend.validate_cursor_limit_page_size("cursor", "limit", "page-size");
+
+  IF _has_cursor THEN
+    _effective_limit := "limit";
+  ELSE
+    _effective_limit := COALESCE("page-size", "limit", 100);
+  END IF;
+
+  PERFORM hafbe_backend.validate_limit(_effective_limit, 1000);
+  PERFORM hafbe_backend.validate_negative_limit(_effective_limit);
   PERFORM hafbe_backend.validate_negative_page("page");
   PERFORM hafbe_backend.validate_block_num_too_high(_block_range.first_block, _head_block_num);
 
   IF hafah_backend.is_path_filter_not_empty("path-filter") THEN
-    -- if path-filter is not empty, validate if extra indexes are available
-    -- and if the operation type is single
     PERFORM hafbe_backend.validate_block_search_indexes();
     PERFORM hafbe_backend.validate_single_operation_type(_operation_types);
 
@@ -338,9 +392,10 @@ BEGIN
     _block_range.first_block,
     _block_range.last_block,
     "page",
-    "page-size",
+    _effective_limit,
     _key_content,
-    _set_of_keys
+    _set_of_keys,
+    "cursor"
   );
 
 END
