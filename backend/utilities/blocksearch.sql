@@ -122,424 +122,7 @@ END
 $$;
 
 -- ============================================================================
--- SECTION 2: Cursor Types and Functions
--- ============================================================================
--- Types and functions for cursor-based pagination to avoid deep page scans.
--- ============================================================================
-
-/*
- * blocksearch_cursor: Decoded cursor state for pagination.
- *
- * Uses STABLE composite sort keys to avoid skipping or duplicating results
- * when multiple operations exist in the same block.
- *
- * FIELDS:
- *   block_num         - Anchor block number (where to start next page)
- *   operation_id      - Unique operation ID within block (for stable ordering)
- *   direction         - Sort direction ('asc' or 'desc')
- *   account_op_seq_no - Last seen account operation sequence (for account filters)
- *   filter_hash       - Hash of filter parameters to detect filter changes
- *   version           - Cursor format version (for future compatibility)
- *
- * SORT KEY HIERARCHY:
- *   - Account queries: account_op_seq_no (unique and stable)
- *   - Operation queries: block_num + operation_id (stable composite key)
- *
- * This ensures deterministic ordering even when:
- *   - Multiple operations exist in the same block
- *   - Multiple results map to the same account_op_seq_no
- */
-DROP TYPE IF EXISTS hafbe_backend.blocksearch_cursor CASCADE;
-CREATE TYPE hafbe_backend.blocksearch_cursor AS (
-  block_num         INT,
-  operation_id      BIGINT,
-  direction         hafbe_backend.sort_direction,
-  account_op_seq_no INT,
-  filter_hash       TEXT,
-  version           INT
-);
-
-/*
- * blocksearch_encode_cursor: Encodes cursor state into a base64 string.
- *
- * The cursor is a JSON object encoded as base64 to make it opaque and
- * URL-safe. Contains all state needed to resume pagination.
- *
- * PARAMETERS:
- *   _cursor - The decoded cursor state
- *
- * RETURNS: Base64-encoded cursor string
- *
- * FORMAT (JSON):
- *   {
- *     "v": 2,
- *     "b": <block_num>,
- *     "o": <operation_id>,
- *     "d": <direction>,
- *     "s": <account_op_seq_no>,
- *     "h": <filter_hash>
- *   }
- */
-CREATE OR REPLACE FUNCTION hafbe_backend.blocksearch_encode_cursor(
-  _cursor hafbe_backend.blocksearch_cursor
-)
-RETURNS TEXT
-LANGUAGE 'plpgsql'
-IMMUTABLE
-AS
-$$
-DECLARE
-  __json JSON;
-BEGIN
-  IF _cursor IS NULL THEN
-    RETURN NULL;
-  END IF;
-
-  __json := json_build_object(
-    'v', COALESCE(_cursor.version, 2),
-    'b', _cursor.block_num,
-    'o', _cursor.operation_id,
-    'd', _cursor.direction,
-    's', _cursor.account_op_seq_no,
-    'h', _cursor.filter_hash
-  );
-
-  RETURN encode(__json::TEXT::BYTEA, 'base64');
-END
-$$;
-
-/*
- * blocksearch_decode_cursor: Decodes a base64 cursor string into cursor state.
- *
- * Validates the cursor format and version. Returns NULL if cursor is NULL
- * or invalid.
- *
- * Supports backward compatibility with v1 cursors (block_num only).
- * v2 cursors include operation_id for stable ordering.
- *
- * PARAMETERS:
- *   _cursor_str - Base64-encoded cursor string
- *
- * RETURNS: Decoded blocksearch_cursor or NULL if invalid
- *
- * THROWS:
- *   Exception if cursor format is invalid or version is unsupported
- */
-CREATE OR REPLACE FUNCTION hafbe_backend.blocksearch_decode_cursor(
-  _cursor_str TEXT
-)
-RETURNS hafbe_backend.blocksearch_cursor
-LANGUAGE 'plpgsql'
-IMMUTABLE
-AS
-$$
-DECLARE
-  __json  JSON;
-  __cursor hafbe_backend.blocksearch_cursor;
-  __version INT;
-BEGIN
-  IF _cursor_str IS NULL OR _cursor_str = '' THEN
-    RETURN NULL;
-  END IF;
-
-  BEGIN
-    __json := convert_from(decode(_cursor_str, 'base64'), 'UTF8')::JSON;
-  EXCEPTION WHEN OTHERS THEN
-    RAISE EXCEPTION 'Invalid cursor format: must be base64-encoded JSON';
-  END;
-
-  __version := COALESCE((__json->>'v')::INT, 1);
-  IF __version NOT IN (1, 2) THEN
-    RAISE EXCEPTION 'Unsupported cursor version: %', __version;
-  END IF;
-
-  IF __version = 1 THEN
-    __cursor := (
-      (__json->>'b')::INT,
-      NULL::BIGINT,
-      (__json->>'d')::hafbe_backend.sort_direction,
-      (__json->>'s')::INT,
-      (__json->>'h')::TEXT,
-      __version
-    )::hafbe_backend.blocksearch_cursor;
-  ELSE
-    __cursor := (
-      (__json->>'b')::INT,
-      (__json->>'o')::BIGINT,
-      (__json->>'d')::hafbe_backend.sort_direction,
-      (__json->>'s')::INT,
-      (__json->>'h')::TEXT,
-      __version
-    )::hafbe_backend.blocksearch_cursor;
-  END IF;
-
-  IF __cursor.block_num IS NULL THEN
-    RAISE EXCEPTION 'Invalid cursor: missing block_num';
-  END IF;
-
-  IF __cursor.direction IS NULL THEN
-    RAISE EXCEPTION 'Invalid cursor: missing direction';
-  END IF;
-
-  RETURN __cursor;
-END
-$$;
-
-/*
- * blocksearch_calculate_filter_hash: Calculates a hash of filter parameters.
- *
- * Used to detect when filter parameters change between cursor requests,
- * which would invalidate the cursor.
- *
- * PARAMETERS:
- *   _operations  - Array of operation type IDs
- *   _account_id  - Account ID
- *   _key_content - Array of key-value filter values
- *   _from_block  - Start of block range
- *   _to_block    - End of block range
- *
- * RETURNS: MD5 hash string of the combined parameters
- */
-CREATE OR REPLACE FUNCTION hafbe_backend.blocksearch_calculate_filter_hash(
-  _operations  INT[],
-  _account_id  INT,
-  _key_content TEXT[],
-  _from_block  INT,
-  _to_block    INT
-)
-RETURNS TEXT
-LANGUAGE 'plpgsql'
-IMMUTABLE
-AS
-$$
-BEGIN
-  RETURN md5(
-    COALESCE(array_to_string(_operations, ','), '') || '|' ||
-    COALESCE(_account_id::TEXT, '') || '|' ||
-    COALESCE(array_to_string(_key_content, ','), '') || '|' ||
-    COALESCE(_from_block::TEXT, '') || '|' ||
-    COALESCE(_to_block::TEXT, '')
-  );
-END
-$$;
-
-/*
- * blocksearch_validate_cursor: Validates cursor against current filter parameters.
- *
- * Checks that:
- * 1. Cursor direction matches requested direction
- * 2. Filter hash matches current filters (if provided in cursor)
- * 3. Cursor block_num is within the requested range
- *
- * PARAMETERS:
- *   _cursor        - Decoded cursor state
- *   _direction     - Requested sort direction
- *   _filter_hash   - Hash of current filter parameters
- *   _from_block    - Start of requested block range
- *   _to_block      - End of requested block range
- *
- * THROWS:
- *   Exception if any validation fails
- */
-CREATE OR REPLACE FUNCTION hafbe_backend.blocksearch_validate_cursor(
-  _cursor      hafbe_backend.blocksearch_cursor,
-  _direction   hafbe_backend.sort_direction,
-  _filter_hash TEXT,
-  _from_block  INT,
-  _to_block    INT
-)
-RETURNS VOID
-LANGUAGE 'plpgsql'
-IMMUTABLE
-AS
-$$
-BEGIN
-  IF _cursor IS NULL THEN
-    RETURN;
-  END IF;
-
-  IF _cursor.direction != _direction THEN
-    RAISE EXCEPTION 'Cursor direction (%) does not match requested direction (%). The cursor was created with direction ''%'' but the current request uses direction ''%''. Please start a new cursor-based pagination with the desired direction.',
-      _cursor.direction, _direction, _cursor.direction, _direction;
-  END IF;
-
-  IF _cursor.filter_hash IS NOT NULL AND _cursor.filter_hash != _filter_hash THEN
-    RAISE EXCEPTION 'Cursor is invalid: filter parameters have changed since the cursor was created. Changing operation-types, account-name, path-filter, from-block, or to-block invalidates an existing cursor. Please start a new cursor-based pagination with the updated filters.';
-  END IF;
-
-  IF _cursor.block_num < _from_block THEN
-    RAISE EXCEPTION 'Cursor block_num (%) is below the requested range start (%). The cursor references a block outside the current from-block/to-block range. Please start a new cursor-based pagination with the correct range.',
-      _cursor.block_num, _from_block;
-  END IF;
-
-  IF _cursor.block_num > _to_block THEN
-    RAISE EXCEPTION 'Cursor block_num (%) is above the requested range end (%). The cursor references a block outside the current from-block/to-block range. Please start a new cursor-based pagination with the correct range.',
-      _cursor.block_num, _to_block;
-  END IF;
-END
-$$;
-
-/*
- * blocksearch_validate_cursor_format: Validates that a cursor string can be decoded.
- *
- * This performs an early validation of the cursor format before any
- * database operations, providing a clear error message for malformed
- * cursors rather than letting decode failures propagate as cryptic errors.
- *
- * PARAMETERS:
- *   _cursor - The cursor string to validate (may be NULL or empty)
- *
- * RAISES: Exception if cursor is non-empty but cannot be decoded
- */
-CREATE OR REPLACE FUNCTION hafbe_backend.blocksearch_validate_cursor_format(
-    _cursor TEXT
-)
-RETURNS VOID
-LANGUAGE 'plpgsql'
-IMMUTABLE
-AS
-$$
-BEGIN
-  IF _cursor IS NULL OR _cursor = '' THEN
-    RETURN;
-  END IF;
-
-  BEGIN
-    PERFORM hafbe_backend.blocksearch_decode_cursor(_cursor);
-  EXCEPTION WHEN OTHERS THEN
-    RAISE EXCEPTION 'Invalid cursor format: %. A valid cursor can be obtained from the next_cursor field of a previous response.', SQLERRM;
-  END;
-END
-$$;
-
-/*
- * blocksearch_get_stable_cursor_boundary: Gets stable boundary condition using composite sort key.
- *
- * Uses block_num + operation_id as a stable composite sort key to avoid
- * skipping or duplicating results when multiple operations exist in the
- * same block. The boundary condition uses row-value comparison for
- * deterministic ordering.
- *
- * For 'desc' order: (block_num, operation_id) < (cursor.block_num, cursor.operation_id)
- * For 'asc' order: (block_num, operation_id) > (cursor.block_num, cursor.operation_id)
- *
- * For v1 cursors (no operation_id), falls back to block_num-only comparison.
- *
- * PARAMETERS:
- *   _cursor          - Decoded cursor state
- *   _block_col_ref   - Block number column reference (e.g., 'bo.block_num')
- *   _op_id_col_ref   - Operation ID column reference (e.g., 'bo.id')
- *
- * RETURNS: SQL condition string fragment with stable ordering
- */
-CREATE OR REPLACE FUNCTION hafbe_backend.blocksearch_get_stable_cursor_boundary(
-  _cursor        hafbe_backend.blocksearch_cursor,
-  _block_col_ref TEXT,
-  _op_id_col_ref TEXT
-)
-RETURNS TEXT
-LANGUAGE 'plpgsql'
-IMMUTABLE
-AS
-$$
-BEGIN
-  IF _cursor IS NULL THEN
-    RETURN 'TRUE';
-  END IF;
-
-  IF _cursor.operation_id IS NULL THEN
-    IF _cursor.direction = 'desc' THEN
-      RETURN format('%s < %L', _block_col_ref, _cursor.block_num);
-    ELSE
-      RETURN format('%s > %L', _block_col_ref, _cursor.block_num);
-    END IF;
-  END IF;
-
-  IF _cursor.direction = 'desc' THEN
-    RETURN format('(%s, %s) < (%L, %L)',
-      _block_col_ref, _op_id_col_ref,
-      _cursor.block_num, _cursor.operation_id);
-  ELSE
-    RETURN format('(%s, %s) > (%L, %L)',
-      _block_col_ref, _op_id_col_ref,
-      _cursor.block_num, _cursor.operation_id);
-  END IF;
-END
-$$;
-
-/*
- * blocksearch_get_cursor_boundary: Gets the block boundary condition from cursor.
- *
- * For 'desc' order: we want blocks < cursor.block_num
- * For 'asc' order: we want blocks > cursor.block_num
- *
- * NOTE: This is the legacy block-only boundary. Use
- * blocksearch_get_stable_cursor_boundary for stable ordering.
- *
- * PARAMETERS:
- *   _cursor     - Decoded cursor state
- *   _col_ref    - Column reference for the WHERE clause (e.g., 'bo.block_num')
- *
- * RETURNS: SQL condition string fragment
- */
-CREATE OR REPLACE FUNCTION hafbe_backend.blocksearch_get_cursor_boundary(
-  _cursor  hafbe_backend.blocksearch_cursor,
-  _col_ref TEXT
-)
-RETURNS TEXT
-LANGUAGE 'plpgsql'
-IMMUTABLE
-AS
-$$
-BEGIN
-  IF _cursor IS NULL THEN
-    RETURN 'TRUE';
-  END IF;
-
-  IF _cursor.direction = 'desc' THEN
-    RETURN format('%s < %L', _col_ref, _cursor.block_num);
-  ELSE
-    RETURN format('%s > %L', _col_ref, _cursor.block_num);
-  END IF;
-END
-$$;
-
-/*
- * blocksearch_get_account_cursor_boundary: Gets sequence boundary for account ops.
- *
- * For 'desc' order: we want account_op_seq_no < cursor.account_op_seq_no
- * For 'asc' order: we want account_op_seq_no > cursor.account_op_seq_no
- *
- * PARAMETERS:
- *   _cursor     - Decoded cursor state
- *   _col_ref    - Column reference (e.g., 'aov.account_op_seq_no')
- *
- * RETURNS: SQL condition string fragment
- */
-CREATE OR REPLACE FUNCTION hafbe_backend.blocksearch_get_account_cursor_boundary(
-  _cursor  hafbe_backend.blocksearch_cursor,
-  _col_ref TEXT
-)
-RETURNS TEXT
-LANGUAGE 'plpgsql'
-IMMUTABLE
-AS
-$$
-BEGIN
-  IF _cursor IS NULL OR _cursor.account_op_seq_no IS NULL THEN
-    RETURN 'TRUE';
-  END IF;
-
-  IF _cursor.direction = 'desc' THEN
-    RETURN format('%s < %L', _col_ref, _cursor.account_op_seq_no);
-  ELSE
-    RETURN format('%s > %L', _col_ref, _cursor.account_op_seq_no);
-  END IF;
-END
-$$;
-
--- ============================================================================
--- SECTION 3: Filter Return Types
+-- SECTION 2: Filter Return Types
 -- ============================================================================
 -- Composite types used to return bundled search results.
 -- ============================================================================
@@ -632,24 +215,19 @@ CREATE TYPE hafbe_backend.gathered_block AS (
  * FIELDS:
  *   blocks            - Array of (block_num, operations) tuples, paginated and ordered
  *   total_count       - Total number of blocks matching the filter (may be capped)
- *   total_pages       - Total number of pages available (for page-based pagination)
- *   min_block_num     - Minimum block number found (for legacy cursor calculation)
- *   pre_grouped_count - Count of operations before grouping (for saturation check)
- *   max_page_limit    - __max_page_count * _limit (for saturation check)
+ *   total_pages       - Total number of pages available
+ *   min_block_num     - Minimum block number found (for cursor calculation)
+ *   pre_grouped_count - Count of operations before grouping (for cursor saturation check)
+ *   max_page_limit    - __max_page_count * _limit (for cursor saturation check)
  *   range_from        - Normalized start of block range
  *   range_to          - Normalized end of block range
- *   next_cursor       - Encoded cursor string for next page (NULL if no more results)
- *   last_block_num    - Last block number in results (for cursor encoding)
- *   last_operation_id - Last operation ID in results (for stable cursor ordering)
- *   last_account_seq  - Last account operation sequence (for account filter cursors)
- *   has_more          - Whether there are more results after this page
  *
  * CURSOR LOGIC:
- *   The next_cursor is calculated by each gatherer using:
- *   - last_block_num: the last block in the result set (direction-aware)
- *   - last_operation_id: the last operation ID for stable ordering
- *   - last_account_seq: for account-based queries, last account_op_seq_no
- *   - has_more: whether LIMIT+1 rows were found (indicating more data)
+ *   The cursor_from value is calculated by blocksearch_build_result using:
+ *   - If min_block_num IS NULL: no results, cursor = range_from
+ *   - If min_block_num = 1: at genesis, cursor = 1
+ *   - If pre_grouped_count != max_page_limit: not saturated, cursor = range_from
+ *   - Otherwise: saturated results, cursor = min_block_num - 1
  */
 DROP TYPE IF EXISTS hafbe_backend.gatherer_result CASCADE;
 CREATE TYPE hafbe_backend.gatherer_result AS (
@@ -660,16 +238,11 @@ CREATE TYPE hafbe_backend.gatherer_result AS (
   pre_grouped_count INT,
   max_page_limit    INT,
   range_from        INT,
-  range_to          INT,
-  next_cursor       TEXT,
-  last_block_num    INT,
-  last_operation_id BIGINT,
-  last_account_seq  INT,
-  has_more          BOOLEAN
+  range_to          INT
 );
 
 -- ============================================================================
--- SECTION 4: Range Calculation Functions
+-- SECTION 3: Range Calculation Functions
 -- ============================================================================
 -- Functions that calculate and normalize block ranges for queries.
 -- Handle NULL inputs by using defaults (genesis or current head).
@@ -915,7 +488,7 @@ END
 $$;
 
 -- ============================================================================
--- SECTION 5: Pagination Functions
+-- SECTION 4: Pagination Functions
 -- ============================================================================
 -- Functions for calculating pagination parameters.
 -- ============================================================================
@@ -1004,7 +577,7 @@ END
 $$;
 
 -- ============================================================================
--- SECTION 6: Block Search Functions
+-- SECTION 5: Block Search Functions
 -- ============================================================================
 -- Functions for finding blocks matching specific criteria.
 -- ============================================================================
@@ -1110,7 +683,7 @@ END
 $$;
 
 -- ============================================================================
--- SECTION 7: Result Building Functions
+-- SECTION 6: Result Building Functions
 -- ============================================================================
 -- Functions for building final API responses from gatherer results.
 -- ============================================================================
@@ -1120,9 +693,10 @@ $$;
  *
  * This is the SINGLE point of enrichment for all block search filters.
  * It takes the intermediate gatherer_result and:
- *   1. Enriches each block with metadata from blocks_view
- *   2. Adds producer_reward, trx_count via helper functions
- *   3. Returns the final block_history response
+ *   1. Calculates the cursor (next from_block for pagination)
+ *   2. Enriches each block with metadata from blocks_view
+ *   3. Adds producer_reward, trx_count via helper functions
+ *   4. Returns the final block_history response
  *
  * PARAMETERS:
  *   _gathered - The gatherer_result from any filter function
@@ -1130,10 +704,12 @@ $$;
  *
  * RETURNS: block_history with enriched block data
  *
- * NOTES:
- *   - next_cursor is pre-computed by each gatherer and stored in _gathered.next_cursor
- *   - block_range.from is the cursor for next page (legacy from-block adjustment)
- *   - For cursor pagination, use the next_cursor field in the API response
+ * CURSOR CALCULATION:
+ *   The cursor indicates where to start the next paginated request.
+ *   - NULL min_block_num: no results found, keep original range_from
+ *   - min_block_num = 1: at genesis, cursor = 1
+ *   - Not saturated (pre_grouped_count != max_page_limit): more data available, keep range_from
+ *   - Saturated: results capped, cursor = min_block_num - 1 (start before current results)
  */
 CREATE OR REPLACE FUNCTION hafbe_backend.blocksearch_build_result(
     _gathered hafbe_backend.gatherer_result,
@@ -1157,13 +733,11 @@ BEGIN
       COALESCE(_gathered.total_count, 0),
       COALESCE(_gathered.total_pages, 0),
       (_gathered.range_from, _gathered.range_to)::hafbe_backend.block_range,
-      '{}'::hafbe_backend.blocksearch[],
-      _gathered.next_cursor,
-      _gathered.has_more
+      '{}'::hafbe_backend.blocksearch[]
     )::hafbe_backend.block_history;
   END IF;
 
-  -- Calculate legacy cursor (from_block adjustment) for backward compatibility
+  -- Calculate cursor for next paginated request
   __cursor_from := CASE
     WHEN _gathered.min_block_num IS NULL THEN
       _gathered.range_from
@@ -1199,9 +773,7 @@ BEGIN
     COALESCE(_gathered.total_count, 0),
     COALESCE(_gathered.total_pages, 0),
     (__cursor_from, _gathered.range_to)::hafbe_backend.block_range,
-    COALESCE(__result, '{}'::hafbe_backend.blocksearch[]),
-    _gathered.next_cursor,
-    _gathered.has_more
+    COALESCE(__result, '{}'::hafbe_backend.blocksearch[])
   )::hafbe_backend.block_history;
 END
 $$;

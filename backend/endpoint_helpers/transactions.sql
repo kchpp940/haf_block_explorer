@@ -8,56 +8,12 @@
 SET ROLE hafbe_owner;
 
 -- =============================================================================
--- SECTION 1: Type Definitions
+-- SECTION 1: Internal Dispatcher (transaction count rollup)
 -- =============================================================================
-
-/*
- * transaction_stats: Transaction statistics for a time period (API output format).
- *
- * FIELDS:
- *   date           - Period timestamp (start of day/month/year)
- *   trx_count      - Total transactions in period
- *   avg_trx        - Average transactions per block
- *   min_trx        - Minimum transactions in a single block
- *   max_trx        - Maximum transactions in a single block
- *   last_block_num - Last block number in the period
- */
-DROP TYPE IF EXISTS hafbe_backend.transaction_stats CASCADE;
-CREATE TYPE hafbe_backend.transaction_stats AS (
-    date           TIMESTAMP,
-    trx_count      INT,
-    avg_trx        INT,
-    min_trx        INT,
-    max_trx        INT,
-    last_block_num INT
-);
-
-/*
- * trx_stats: Transaction statistics for a time period (internal format).
- *
- * Similar to transaction_stats but with count_blocks instead of avg_trx.
- * Used for aggregation before calculating averages.
- *
- * FIELDS:
- *   date           - Period timestamp
- *   trx_count      - Total transactions in period
- *   count_blocks   - Number of blocks in period
- *   min_trx        - Minimum transactions in a single block
- *   max_trx        - Maximum transactions in a single block
- *   last_block_num - Last block number in the period
- */
-DROP TYPE IF EXISTS hafbe_backend.trx_stats CASCADE;
-CREATE TYPE hafbe_backend.trx_stats AS (
-    date           TIMESTAMP,
-    trx_count      INT,
-    count_blocks   INT,
-    min_trx        INT,
-    max_trx        INT,
-    last_block_num INT
-);
-
--- =============================================================================
--- SECTION 2: Aggregation Helper Functions
+-- get_transaction_stats + transaction_stats_by_year read from pre-computed
+-- transaction_stats_by_day/_by_month tables and return flat trx_stats rows.
+-- These are used internally by get_operation_group_aggregation to populate
+-- total_transactions in the final response.
 -- =============================================================================
 
 /*
@@ -176,37 +132,128 @@ END
 $$;
 
 -- =============================================================================
--- SECTION 3: Main API Function
+-- SECTION 3: Unified Aggregation (operation-group dimension)
+-- =============================================================================
+-- Single aggregation path for all granularities (daily/monthly/yearly).
+-- Always returns operation_group_stats with per-group breakdown.
+-- The `operation-group` parameter acts purely as a filter; NULL = all groups.
 -- =============================================================================
 
 /*
- * get_transaction_aggregation: Main function for transaction statistics API.
+ * operation_group_stats_by_year: Aggregates monthly per-group stats into yearly.
  *
- * Returns transaction statistics for a block range at the specified granularity.
- * Fills gaps in the time series with zero values for periods without data.
+ * Reads pre-computed monthly per-op-type stats, maps to groups, and sums.
+ * Used by get_operation_group_stats when granularity is 'yearly'.
+ */
+CREATE OR REPLACE FUNCTION hafbe_backend.operation_group_stats_by_year(
+    _from     TIMESTAMP,
+    _to       TIMESTAMP,
+    _groups   hafbe_backend.operation_group[] DEFAULT NULL
+)
+RETURNS SETOF hafbe_backend.op_group_stats_flat
+LANGUAGE 'plpgsql' STABLE
+AS
+$$
+BEGIN
+  RETURN QUERY
+    SELECT
+      DATE_TRUNC('year', s.updated_at)::TIMESTAMP AS date,
+      hafbe_backend.get_operation_group(s.op_type_id) AS op_group,
+      SUM(s.op_count)::BIGINT       AS op_count,
+      MAX(s.last_block_num)::INT    AS last_block_num
+    FROM hafbe_app.operation_type_stats_by_month s
+    WHERE DATE_TRUNC('year', s.updated_at) BETWEEN _from AND _to
+      AND (_groups IS NULL OR hafbe_backend.get_operation_group(s.op_type_id) = ANY(_groups))
+    GROUP BY DATE_TRUNC('year', s.updated_at), hafbe_backend.get_operation_group(s.op_type_id);
+END
+$$;
+
+/*
+ * get_operation_group_stats: Retrieves per-group operation counts at specified granularity.
+ *
+ * Dispatcher function that reads from the appropriate pre-computed table
+ * based on the requested granularity. Maps op_type_id to operation_group on the fly.
+ *
+ * DATA SOURCES:
+ *   - daily:   hafbe_app.operation_type_stats_by_day
+ *   - monthly: hafbe_app.operation_type_stats_by_month
+ *   - yearly:  Computed from monthly via operation_group_stats_by_year()
+ */
+CREATE OR REPLACE FUNCTION hafbe_backend.get_operation_group_stats(
+    _granularity hafbe_backend.granularity,
+    _from        TIMESTAMP,
+    _to          TIMESTAMP,
+    _groups      hafbe_backend.operation_group[] DEFAULT NULL
+)
+RETURNS SETOF hafbe_backend.op_group_stats_flat
+LANGUAGE 'plpgsql' STABLE
+AS
+$$
+BEGIN
+  IF _granularity = 'daily' THEN
+    RETURN QUERY
+      SELECT
+        s.updated_at,
+        hafbe_backend.get_operation_group(s.op_type_id) AS op_group,
+        SUM(s.op_count)::BIGINT AS op_count,
+        MAX(s.last_block_num)::INT AS last_block_num
+      FROM hafbe_app.operation_type_stats_by_day s
+      WHERE s.updated_at BETWEEN _from AND _to
+        AND (_groups IS NULL OR hafbe_backend.get_operation_group(s.op_type_id) = ANY(_groups))
+      GROUP BY s.updated_at, hafbe_backend.get_operation_group(s.op_type_id);
+
+  ELSIF _granularity = 'monthly' THEN
+    RETURN QUERY
+      SELECT
+        s.updated_at,
+        hafbe_backend.get_operation_group(s.op_type_id) AS op_group,
+        SUM(s.op_count)::BIGINT AS op_count,
+        MAX(s.last_block_num)::INT AS last_block_num
+      FROM hafbe_app.operation_type_stats_by_month s
+      WHERE s.updated_at BETWEEN _from AND _to
+        AND (_groups IS NULL OR hafbe_backend.get_operation_group(s.op_type_id) = ANY(_groups))
+      GROUP BY s.updated_at, hafbe_backend.get_operation_group(s.op_type_id);
+
+  ELSIF _granularity = 'yearly' THEN
+    RETURN QUERY
+      SELECT *
+      FROM hafbe_backend.operation_group_stats_by_year(_from, _to, _groups);
+
+  ELSE
+    RAISE EXCEPTION 'Unsupported granularity: %', _granularity;
+  END IF;
+END
+$$;
+
+/*
+ * get_operation_group_aggregation: Unified aggregation function for the
+ * transaction-statistics endpoint.
+ *
+ * Always returns one row per period with:
+ *   - total_transactions (from transaction_stats rollup)
+ *   - total_operations   (sum across groups)
+ *   - groups             (nested array of {group, op_count, trx_count})
+ *   - last_block_num
+ *
+ * The same CTE pipeline is used for daily/monthly/yearly granularities;
+ * the granularity dispatch happens inside get_operation_group_stats and
+ * get_transaction_stats.
  *
  * PARAMETERS:
- *   _granularity - Time granularity: 'daily', 'monthly', or 'yearly'
- *   _direction   - Sort direction: 'asc' or 'desc'
- *   _from_block  - Starting block number (NULL = genesis)
- *   _to_block    - Ending block number (NULL = current head)
- *
- * RETURNS: Set of transaction_stats records covering the time range
- *
- * PROCESSING STEPS:
- *   1. Convert block range to timestamp range
- *   2. Generate complete time series for the period
- *   3. Left join with actual stats (gaps become NULL)
- *   4. Fill missing last_block_num by finding nearest block
- *   5. Calculate avg_trx from trx_count and count_blocks
+ *   _granularity - 'daily' | 'monthly' | 'yearly'
+ *   _direction   - 'asc' | 'desc'
+ *   _from_block  - lower bound block number
+ *   _to_block    - upper bound block number
+ *   _groups      - optional filter; NULL = include all groups
  */
-CREATE OR REPLACE FUNCTION hafbe_backend.get_transaction_aggregation(
+CREATE OR REPLACE FUNCTION hafbe_backend.get_operation_group_aggregation(
     _granularity hafbe_backend.granularity,
     _direction   hafbe_backend.sort_direction,
     _from_block  INT,
-    _to_block    INT
+    _to_block    INT,
+    _groups      hafbe_backend.operation_group[] DEFAULT NULL
 )
-RETURNS SETOF hafbe_backend.transaction_stats
+RETURNS SETOF hafbe_backend.operation_group_stats
 LANGUAGE 'plpgsql' STABLE
 AS
 $$
@@ -219,12 +266,10 @@ DECLARE
   __one_period          INTERVAL;
   __hafbe_current_block INT := (SELECT current_block_num FROM hafd.contexts WHERE name = 'hafbe_app');
 BEGIN
-  -- Normalize block range
   SELECT from_block, to_block
   INTO __from, __to
   FROM hafbe_backend.blocksearch_range(_from_block, _to_block, __hafbe_current_block);
 
-  -- Convert granularity enum to PostgreSQL interval keyword
   __granularity := (
     CASE
       WHEN _granularity = 'daily'   THEN 'day'
@@ -234,7 +279,6 @@ BEGIN
     END
   );
 
-  -- Convert blocks to timestamps (truncated to period boundary)
   __from_timestamp := DATE_TRUNC(
     __granularity,
     (SELECT b.created_at FROM hive.blocks_view b WHERE b.num = __from)::TIMESTAMP
@@ -247,102 +291,75 @@ BEGIN
   __one_period := ('1 ' || __granularity)::INTERVAL;
 
   RETURN QUERY (
-    /*
-     * =========================================================================
-     * CTE: date_series
-     * =========================================================================
-     * PURPOSE: Generate complete time series for the requested range.
-     *
-     * Ensures we return a row for every period, even if no transactions
-     * occurred during that time.
-     */
     WITH date_series AS (
-      SELECT generate_series(__from_timestamp, __to_timestamp, __one_period) AS date
+      SELECT generate_series(__from_timestamp, __to_timestamp, __one_period) AS period
     ),
 
-    /*
-     * =========================================================================
-     * CTE: get_daily_aggregation
-     * =========================================================================
-     * WHY MATERIALIZED: Expensive query to pre-computed stats tables.
-     *
-     * PURPOSE: Fetch actual transaction statistics for the time range.
-     */
-    get_daily_aggregation AS MATERIALIZED (
-      SELECT
-        bh.date,
-        bh.trx_count,
-        bh.count_blocks,
-        bh.min_trx,
-        bh.max_trx,
-        bh.last_block_num
-      FROM hafbe_backend.get_transaction_stats(_granularity, __from_timestamp, __to_timestamp) bh
+    group_stats AS MATERIALIZED (
+      SELECT s.date AS period, s.op_group, s.op_count, s.last_block_num
+      FROM hafbe_backend.get_operation_group_stats(_granularity, __from_timestamp, __to_timestamp, _groups) s
     ),
 
-    /*
-     * =========================================================================
-     * CTE: transaction_records
-     * =========================================================================
-     * PURPOSE: Left join date series with actual data.
-     *
-     * Gaps in data (periods with no transactions) will have NULL values
-     * which are replaced with 0/NULL as appropriate.
-     */
-    transaction_records AS (
+    period_groups AS (
       SELECT
-        ds.date,
-        COALESCE(bh.trx_count, 0)    AS trx_count,
-        COALESCE(bh.count_blocks, 0) AS count_blocks,
-        COALESCE(bh.min_trx, 0)      AS min_trx,
-        COALESCE(bh.max_trx, 0)      AS max_trx,
-        bh.last_block_num            AS last_block_num  -- NULL if no data
+        gs.period,
+        SUM(gs.op_count)::BIGINT AS total_operations,
+        ARRAY_AGG(
+          ROW(gs.op_group, gs.op_count, 0)::hafbe_backend.period_op_group_count
+          ORDER BY gs.op_group
+        ) AS groups,
+        MAX(gs.last_block_num)::INT AS last_block_num
+      FROM group_stats gs
+      GROUP BY gs.period
+    ),
+
+    trx_stats AS MATERIALIZED (
+      SELECT
+        ts.date::TIMESTAMP AS period,
+        ts.trx_count::BIGINT AS trx_count,
+        ts.last_block_num
+      FROM hafbe_backend.get_transaction_stats(_granularity, __from_timestamp, __to_timestamp) ts
+    ),
+
+    assembled AS (
+      SELECT
+        ds.period,
+        COALESCE(ts.trx_count, 0)        AS total_transactions,
+        COALESCE(pg.total_operations, 0) AS total_operations,
+        COALESCE(pg.groups, ARRAY[]::hafbe_backend.period_op_group_count[]) AS groups,
+        COALESCE(pg.last_block_num, ts.last_block_num) AS last_block_num
       FROM date_series ds
-      LEFT JOIN get_daily_aggregation bh ON ds.date = bh.date
+      LEFT JOIN period_groups pg ON pg.period = ds.period
+      LEFT JOIN trx_stats  ts ON ts.period = ds.period
     ),
 
-    /*
-     * =========================================================================
-     * CTE: join_missing_block
-     * =========================================================================
-     * PURPOSE: Fill in missing last_block_num for periods without transactions.
-     *
-     * Uses LATERAL join to find the most recent block before the end of
-     * the period. This ensures every row has a valid block reference.
-     */
-    join_missing_block AS (
+    with_block AS (
       SELECT
-        fb.date,
-        fb.trx_count,
-        fb.count_blocks,
-        fb.min_trx,
-        fb.max_trx,
-        COALESCE(fb.last_block_num, jl.last_block_num) AS last_block_num
-      FROM transaction_records fb
+        a.period,
+        a.total_transactions,
+        a.total_operations,
+        a.groups,
+        COALESCE(a.last_block_num, jl.last_block_num) AS last_block_num
+      FROM assembled a
       LEFT JOIN LATERAL (
         SELECT b.num AS last_block_num
         FROM hive.blocks_view b
-        WHERE b.created_at <= fb.date + __one_period
+        WHERE b.created_at <= a.period + __one_period
         ORDER BY b.created_at DESC
         LIMIT 1
-      ) jl ON fb.last_block_num IS NULL
+      ) jl ON a.last_block_num IS NULL
     )
 
-    /*
-     * Final projection:
-     * - Adjust date to end of period (capped at current time)
-     * - Calculate average from count (avoid division by zero)
-     */
     SELECT
-      LEAST(fb.date + __one_period, CURRENT_TIMESTAMP)::TIMESTAMP AS adjusted_date,
-      fb.trx_count::INT,
-      (CASE WHEN fb.count_blocks = 0 THEN 0 ELSE (fb.trx_count / fb.count_blocks) END)::INT AS avg_trx,
-      fb.min_trx::INT,
-      fb.max_trx::INT,
-      fb.last_block_num::INT
-    FROM join_missing_block fb
+      LEAST(wb.period + __one_period, CURRENT_TIMESTAMP)::TIMESTAMP AS date,
+      wb.total_transactions,
+      wb.total_operations,
+      wb.groups,
+      wb.last_block_num
+    FROM with_block wb
     ORDER BY
-      (CASE WHEN _direction = 'desc' THEN fb.date ELSE NULL END) DESC,
-      (CASE WHEN _direction = 'asc' THEN fb.date ELSE NULL END) ASC
+      (CASE WHEN _direction = 'desc' THEN wb.period ELSE NULL END) DESC,
+      (CASE WHEN _direction = 'asc'  THEN wb.period ELSE NULL END) ASC
   );
 END
 $$;

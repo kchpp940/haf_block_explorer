@@ -291,4 +291,145 @@ BEGIN
 END
 $$;
 
+-- ============================================================================
+-- Operation Group Mapping Functions
+-- ============================================================================
+-- Maps operation type IDs to semantic groups (governance, token, account, etc.)
+-- for aggregating statistics by operation category.
+-- ============================================================================
+
+CREATE OR REPLACE FUNCTION hafbe_backend.get_operation_group(
+    _op_type_id INT
+)
+RETURNS hafbe_backend.operation_group
+LANGUAGE 'plpgsql' STABLE
+AS
+$$
+DECLARE
+  _op_name TEXT;
+BEGIN
+  SELECT name INTO _op_name FROM hafd.operation_types WHERE id = _op_type_id;
+
+  IF _op_name IS NULL THEN
+    RETURN 'other';
+  END IF;
+
+  -- Governance operations (proposals, voting, witnesses voting)
+  IF _op_name IN (
+    'hive::protocol::update_proposal_operation',
+    'hive::protocol::delete_proposal_operation',
+    'hive::protocol::create_proposal_operation',
+    'hive::protocol::update_proposal_votes_operation',
+    'hive::protocol::proposal_pay_operation',
+    'hive::protocol::dhf_funding_operation',
+    'hive::protocol::account_witness_vote_operation',
+    'hive::protocol::account_witness_proxy_operation',
+    'hive::protocol::proxy_cleared_operation',
+    'hive::protocol::decline_voting_rights_operation',
+    'hive::protocol::declined_voting_rights_operation',
+    'hive::protocol::witness_update_operation',
+    'hive::protocol::witness_set_properties_operation'
+  ) THEN
+    RETURN 'governance';
+
+  -- Token operations (transfers, power up/down, rewards)
+  ELSIF _op_name IN (
+    'hive::protocol::transfer_operation',
+    'hive::protocol::transfer_to_vesting_operation',
+    'hive::protocol::withdraw_vesting_operation',
+    'hive::protocol::set_withdraw_vesting_route_operation',
+    'hive::protocol::fill_vesting_withdraw_operation',
+    'hive::protocol::transfer_to_savings_operation',
+    'hive::protocol::transfer_from_savings_operation',
+    'hive::protocol::cancel_transfer_from_savings_operation',
+    'hive::protocol::override_transfer_operation',
+    'hive::protocol::fill_order_operation',
+    'hive::protocol::fill_convert_request_operation',
+    'hive::protocol::convert_operation',
+    'hive::protocol::collateralized_convert_operation',
+    'hive::protocol::fill_collateralized_convert_request_operation',
+    'hive::protocol::claim_reward_balance_operation',
+    'hive::protocol::author_reward_operation',
+    'hive::protocol::curation_reward_operation',
+    'hive::protocol::comment_reward_operation',
+    'hive::protocol::comment_benefactor_reward_operation',
+    'hive::protocol::producer_reward_operation',
+    'hive::protocol::interest_operation',
+    'hive::protocol::liquidity_reward_operation',
+    'hive::protocol::dhf_conversion_operation'
+  ) THEN
+    RETURN 'token';
+
+  -- Account operations (creation, recovery, profile updates)
+  ELSIF _op_name IN (
+    'hive::protocol::account_create_operation',
+    'hive::protocol::account_create_with_delegation_operation',
+    'hive::protocol::create_claimed_account_operation',
+    'hive::protocol::account_created_operation',
+    'hive::protocol::claim_account_operation',
+    'hive::protocol::account_update_operation',
+    'hive::protocol::account_update2_operation',
+    'hive::protocol::recover_account_operation',
+    'hive::protocol::request_account_recovery_operation',
+    'hive::protocol::changed_recovery_account_operation',
+    'hive::protocol::reset_account_operation',
+    'hive::protocol::set_reset_account_operation',
+    'hive::protocol::expired_account_notification_operation',
+    'hive::protocol::create_claimed_account_delegation_operation'
+  ) THEN
+    RETURN 'account';
+
+  -- Comment operations (posts, comments, votes)
+  ELSIF _op_name IN (
+    'hive::protocol::comment_operation',
+    'hive::protocol::vote_operation',
+    'hive::protocol::delete_comment_operation',
+    'hive::protocol::comment_options_operation',
+    'hive::protocol::comment_payout_update_operation',
+    'hive::protocol::effective_comment_vote_operation',
+    'hive::protocol::ineffective_delete_comment_operation'
+  ) THEN
+    RETURN 'comment';
+
+  -- Witness operations (block production, feed)
+  ELSIF _op_name IN (
+    'hive::protocol::producer_missed_operation',
+    'hive::protocol::feed_publish_operation',
+    'hive::protocol::pow_operation',
+    'hive::protocol::pow2_operation',
+    'hive::protocol::report_over_production_operation'
+  ) THEN
+    RETURN 'witness';
+
+  -- Market operations
+  ELSIF _op_name IN (
+    'hive::protocol::limit_order_create_operation',
+    'hive::protocol::limit_order_create2_operation',
+    'hive::protocol::limit_order_cancel_operation',
+    'hive::protocol::limit_order_cancelled_operation'
+  ) THEN
+    RETURN 'market';
+
+  ELSE
+    RETURN 'other';
+  END IF;
+END
+$$;
+
+CREATE OR REPLACE FUNCTION hafbe_backend.get_operation_group_op_types(
+    _group hafbe_backend.operation_group
+)
+RETURNS INT[]
+LANGUAGE 'plpgsql' STABLE
+AS
+$$
+BEGIN
+  RETURN ARRAY(
+    SELECT id
+    FROM hafd.operation_types
+    WHERE hafbe_backend.get_operation_group(id) = _group
+  );
+END
+$$;
+
 RESET ROLE;
