@@ -119,9 +119,8 @@ $$;
  * get_witness_votes_history: Gets historical voting records for a witness.
  *
  * Returns vote history including both approve and unapprove actions.
- * Reads from witness_votes_history_resolved_view which already handles
- * vest resolution (account_vest_stats_cache with fallback to
- * expired_voter_stats_view), so no duplicate JOIN logic is needed here.
+ * Handles cases where voters no longer have current stats by falling
+ * back to expired voter stats.
  *
  * PARAMETERS:
  *   witness        - Witness account ID
@@ -133,11 +132,6 @@ $$;
  *   to-block       - Optional: ending block filter
  *
  * RETURNS: Set of witness_votes_history_record with vote details
- *
- * DATA SOURCE: hafbe_backend.witness_votes_history_resolved_view
- *   - This view already resolves vests, account_vests, proxied_vests
- *   - Handles both active and expired voter stats
- *   - Includes proxy cascade accounting
  */
 DROP FUNCTION IF EXISTS hafbe_backend.get_witness_votes_history;
 CREATE OR REPLACE FUNCTION hafbe_backend.get_witness_votes_history(
@@ -162,50 +156,113 @@ BEGIN
      * =========================================================================
      * CTE: limited_set
      * =========================================================================
-     * PURPOSE: Paginate directly from witness_votes_history_resolved_view.
+     * WHY MATERIALIZED: Complex filters and joins, pagination applied.
      *
-     * All vest resolution is done in the view, so we just filter, sort,
-     * and paginate here. This is much simpler than the old implementation
-     * which had 4 CTEs to handle vest resolution inline.
+     * PURPOSE: Fetch vote history with vest stats at time of vote.
+     *
+     * NOTE: Uses LEFT JOIN to account_vest_stats_cache because voters who
+     * removed their vote won't have current stats. These will be filled
+     * from expired_voter_stats_view in later CTEs.
      */
     WITH limited_set AS MATERIALIZED (
       SELECT
-        rv.voter_name,
-        rv.approve,
-        rv.vests,
-        rv.account_vests,
-        rv.proxied_vests,
-        rv.timestamp,
-        rv.source_op_block,
-        rv.voter_id
-      FROM hafbe_backend.witness_votes_history_resolved_view rv
+        av.name,
+        cwv.voter_id,
+        cwv.approve,
+        avs.vests,
+        avs.account_vests,
+        avs.proxied_vests,
+        cwv.source_op_block,
+        bv.created_at
+      FROM hafbe_backend.witness_votes_history_view cwv
+      -- LEFT JOIN: voter may no longer be active, stats may be NULL
+      LEFT JOIN hafbe_app.account_vest_stats_cache avs ON avs.account_id = cwv.voter_id
+      JOIN hive.blocks_view bv                         ON bv.num = cwv.source_op_block
+      JOIN hive.accounts_view av                       ON av.id = cwv.voter_id
       WHERE
-        rv.witness_id = "witness" AND
-        ("filter_account" IS NULL OR rv.voter_id = "filter_account") AND
-        ("from-block" IS NULL     OR rv.source_op_block >= "from-block") AND
-        ("to-block" IS NULL       OR rv.source_op_block <= "to-block")
+        cwv.witness_id = "witness" AND
+        ("filter_account" IS NULL OR cwv.voter_id = "filter_account") AND
+        ("from-block" IS NULL     OR cwv.source_op_block >= "from-block") AND
+        ("to-block" IS NULL       OR cwv.source_op_block <= "to-block")
       ORDER BY
-        (CASE WHEN "direction" = 'desc' THEN rv.source_op_block ELSE NULL END) DESC,
-        (CASE WHEN "direction" = 'asc'  THEN rv.source_op_block ELSE NULL END) ASC,
-        (CASE WHEN "direction" = 'desc' THEN rv.voter_id        ELSE NULL END) DESC,
-        (CASE WHEN "direction" = 'asc'  THEN rv.voter_id        ELSE NULL END) ASC
+        (CASE WHEN "direction" = 'desc' THEN cwv.source_op_block ELSE NULL END) DESC,
+        (CASE WHEN "direction" = 'asc'  THEN cwv.source_op_block ELSE NULL END) ASC,
+        (CASE WHEN "direction" = 'desc' THEN cwv.voter_id        ELSE NULL END) DESC,
+        (CASE WHEN "direction" = 'asc'  THEN cwv.voter_id        ELSE NULL END) ASC
       OFFSET __offset
       LIMIT "page-size"
+    ),
+
+    /*
+     * =========================================================================
+     * CTE: empty_results
+     * =========================================================================
+     * PURPOSE: For voters without current stats, fetch from expired stats.
+     *
+     * Expired voter stats are preserved for historical accuracy even after
+     * a voter removes their vote.
+     */
+    empty_results AS (
+      SELECT
+        ls.name,
+        ls.voter_id,
+        ls.approve,
+        evs.vests,
+        evs.account_vests,
+        evs.proxied_vests,
+        ls.source_op_block,
+        ls.created_at
+      FROM limited_set ls
+      JOIN hafbe_backend.expired_voter_stats_view evs ON evs.account_id = ls.voter_id
+      WHERE ls.vests IS NULL
+    ),
+
+    /*
+     * =========================================================================
+     * CTE: not_empty_results
+     * =========================================================================
+     * PURPOSE: Pass through records that already have stats.
+     */
+    not_empty_results AS (
+      SELECT
+        ls.name,
+        ls.voter_id,
+        ls.approve,
+        ls.vests,
+        ls.account_vests,
+        ls.proxied_vests,
+        ls.source_op_block,
+        ls.created_at
+      FROM limited_set ls
+      WHERE ls.vests IS NOT NULL
+    ),
+
+    /*
+     * =========================================================================
+     * CTE: union_results
+     * =========================================================================
+     * PURPOSE: Combine records with and without current stats.
+     */
+    union_results AS (
+      SELECT * FROM empty_results
+      UNION ALL
+      SELECT * FROM not_empty_results
     )
 
     SELECT
-      ls.voter_name::TEXT,
-      ls.approve,
-      ls.vests::TEXT,
-      ls.account_vests::TEXT,
-      ls.proxied_vests::TEXT,
-      ls.timestamp
-    FROM limited_set ls
+      ur.name::TEXT,
+      ur.approve,
+      ur.vests::TEXT,
+      ur.account_vests::TEXT,
+      ur.proxied_vests::TEXT,
+      ur.created_at
+    FROM union_results ur
+    -- Re-apply sort after UNION
     ORDER BY
-      (CASE WHEN "direction" = 'desc' THEN ls.source_op_block ELSE NULL END) DESC,
-      (CASE WHEN "direction" = 'asc'  THEN ls.source_op_block ELSE NULL END) ASC,
-      (CASE WHEN "direction" = 'desc' THEN ls.voter_id        ELSE NULL END) DESC,
-      (CASE WHEN "direction" = 'asc'  THEN ls.voter_id        ELSE NULL END) ASC
+      (CASE WHEN "direction" = 'desc' THEN ur.source_op_block ELSE NULL END) DESC,
+      (CASE WHEN "direction" = 'asc'  THEN ur.source_op_block ELSE NULL END) ASC,
+      (CASE WHEN "direction" = 'desc' THEN ur.voter_id        ELSE NULL END) DESC,
+      (CASE WHEN "direction" = 'asc'  THEN ur.voter_id        ELSE NULL END) ASC
   );
 END
 $$;
@@ -407,157 +464,6 @@ BEGIN
     LEFT JOIN hafbe_app.witness_votes_cache all_votes   ON all_votes.witness_id = ls.witness_id
     LEFT JOIN hafbe_app.witness_votes_change_cache wvcc ON wvcc.witness_id = ls.witness_id
   );
-END
-$$;
-
--- =============================================================================
--- SECTION 2.5: Votes Timeline Functions
--- =============================================================================
-
-/*
- * get_witness_votes_timeline: Gets daily aggregated vote changes for a witness.
- *
- * Reads directly from witness_votes_history_resolved_view — the same shared
- * data source used by get_witness_votes_history — and performs aggregation
- * and pagination entirely in the database layer. This is efficient because:
- *   1. No intermediate data transfer between functions
- *   2. The database can optimize the GROUP BY and pagination plan
- *   3. Only aggregated results are returned, not raw history records
- *
- * Groups all vote records by date and computes:
- *   - new_votes:       count of approve=TRUE records per day
- *   - revoked_votes:   count of approve=FALSE records per day
- *   - proxy_vests_change: net proxied vests change per day
- *   - net_vests:       net total vests change per day
- *
- * PARAMETERS:
- *   witness    - Witness account ID
- *   page       - Page number (1-based)
- *   page-size  - Number of days per page
- *   direction  - Sort direction: 'asc' or 'desc'
- *   from-block - Optional: starting block filter
- *   to-block   - Optional: ending block filter
- *
- * RETURNS: Set of witness_votes_timeline_record with daily aggregates
- *
- * DATA SOURCE: hafbe_backend.witness_votes_history_resolved_view
- *   - Shared with get_witness_votes_history for consistent vest resolution
- *   - No need to duplicate proxy/expired handling logic
- */
-DROP FUNCTION IF EXISTS hafbe_backend.get_witness_votes_timeline;
-CREATE OR REPLACE FUNCTION hafbe_backend.get_witness_votes_timeline(
-    "witness"    INT,
-    "page"       INT,
-    "page-size"  INT,
-    "direction"  hafbe_backend.sort_direction,
-    "from-block" INT,
-    "to-block"   INT
-)
-RETURNS SETOF hafbe_backend.witness_votes_timeline_record
-LANGUAGE 'plpgsql' STABLE
-SET plan_cache_mode = force_custom_plan
-AS
-$$
-DECLARE
-  __offset INT := ((("page" - 1) * "page-size"));
-BEGIN
-  RETURN QUERY (
-    /*
-     * =========================================================================
-     * CTE: daily
-     * =========================================================================
-     * PURPOSE: Read directly from the shared resolved view and aggregate by
-     *   date entirely in the database. This is far more efficient than
-     *   pulling all history records through another function first.
-     *
-     * The view already has vests and proxied_vests resolved, so we just
-     *   need to filter, group, and sum.
-     */
-    WITH daily AS (
-      SELECT
-        DATE(rv.timestamp) AS day,
-        COUNT(*) FILTER (WHERE rv.approve = TRUE)  AS new_votes,
-        COUNT(*) FILTER (WHERE rv.approve = FALSE) AS revoked_votes,
-        COALESCE(SUM(rv.proxied_vests) FILTER (WHERE rv.approve = TRUE), 0)
-          - COALESCE(SUM(rv.proxied_vests) FILTER (WHERE rv.approve = FALSE), 0)
-          AS proxy_vests_change,
-        COALESCE(SUM(rv.vests) FILTER (WHERE rv.approve = TRUE), 0)
-          - COALESCE(SUM(rv.vests) FILTER (WHERE rv.approve = FALSE), 0)
-          AS net_vests
-      FROM hafbe_backend.witness_votes_history_resolved_view rv
-      WHERE
-        rv.witness_id = "witness" AND
-        ("from-block" IS NULL OR rv.source_op_block >= "from-block") AND
-        ("to-block" IS NULL   OR rv.source_op_block <= "to-block")
-      GROUP BY DATE(rv.timestamp)
-    ),
-
-    /*
-     * =========================================================================
-     * CTE: limited_set
-     * =========================================================================
-     * PURPOSE: Apply pagination to the daily aggregated results.
-     *   This runs after aggregation, so we only page through the compact
-     *   daily rows rather than the full history.
-     */
-    limited_set AS (
-      SELECT
-        d.day,
-        d.new_votes,
-        d.revoked_votes,
-        d.proxy_vests_change,
-        d.net_vests
-      FROM daily d
-      ORDER BY
-        (CASE WHEN "direction" = 'desc' THEN d.day ELSE NULL END) DESC,
-        (CASE WHEN "direction" = 'asc'  THEN d.day ELSE NULL END) ASC
-      OFFSET __offset
-      LIMIT "page-size"
-    )
-
-    SELECT
-      ls.day,
-      ls.new_votes,
-      ls.revoked_votes,
-      ls.proxy_vests_change::TEXT,
-      ls.net_vests::TEXT
-    FROM limited_set ls
-    ORDER BY
-      (CASE WHEN "direction" = 'desc' THEN ls.day ELSE NULL END) DESC,
-      (CASE WHEN "direction" = 'asc'  THEN ls.day ELSE NULL END) ASC
-  );
-END
-$$;
-
-/*
- * get_witness_votes_timeline_count: Counts distinct days with vote activity
- * for a witness.
- *
- * Reads from the same shared resolved view for consistency.
- *
- * PARAMETERS:
- *   _witness_id  - Witness account ID
- *   _block_range - Optional: block range filter
- *
- * RETURNS: Count of distinct days that have vote activity
- *
- * DATA SOURCE: hafbe_backend.witness_votes_history_resolved_view
- */
-CREATE OR REPLACE FUNCTION hafbe_backend.get_witness_votes_timeline_count(
-    _witness_id  INT,
-    _block_range hive.blocks_range
-)
-RETURNS INT
-LANGUAGE 'plpgsql' STABLE
-AS
-$$
-BEGIN
-  RETURN COUNT(DISTINCT DATE(rv.timestamp))
-  FROM hafbe_backend.witness_votes_history_resolved_view rv
-  WHERE
-    rv.witness_id = _witness_id AND
-    (_block_range.first_block IS NULL OR rv.source_op_block >= _block_range.first_block) AND
-    (_block_range.last_block IS NULL  OR rv.source_op_block <= _block_range.last_block);
 END
 $$;
 

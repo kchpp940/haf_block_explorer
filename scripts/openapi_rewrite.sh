@@ -18,6 +18,7 @@ fi
 endpoints="endpoints"
 rewrite_dir="${endpoints}_openapi"
 input_file="rewrite_rules.conf"
+REWRITES_FILE="../$endpoints/$input_file"
 temp_output_file=$(mktemp)
 
 # Default directories with fixed order if none provided
@@ -31,12 +32,12 @@ ENDPOINTS_IN_ORDER="
 ../$endpoints/types/operations.sql
 ../$endpoints/types/transactions.sql
 ../$endpoints/types/proposals.sql
+../$endpoints/types/metadata.sql
 ../$endpoints/witnesses/get_witnesses.sql
 ../$endpoints/witnesses/get_witness.sql
 ../$endpoints/witnesses/get_witness_voters.sql
 ../$endpoints/witnesses/get_witness_voters_num.sql
 ../$endpoints/witnesses/get_witness_votes_history.sql
-../$endpoints/witnesses/get_witness_votes_timeline.sql
 ../$endpoints/accounts/get_account.sql
 ../$endpoints/accounts/get_account_authority.sql
 ../$endpoints/accounts/get_account_proxies_power.sql
@@ -52,7 +53,9 @@ ENDPOINTS_IN_ORDER="
 ../$endpoints/other/get_hafbe_version.sql
 ../$endpoints/other/get_hafbe_last_synced_block.sql
 ../$endpoints/other/get_input_type.sql
-../$endpoints/other/get_latest_blocks.sql"
+../$endpoints/other/get_latest_blocks.sql
+../$endpoints/other/get_endpoints_metadata.sql
+../$endpoints/other/get_endpoints_consistency.sql"
 
 # Function to reverse the lines
 reverse_lines() {
@@ -134,3 +137,13 @@ reverse_lines > "$temp_output_file"
 mv "$temp_output_file" "$SCRIPTDIR/../$rewrite_dir/$input_file"
 rm "$input_file"
 echo "Rewritten scripts saved in $rewrite_dir"
+
+echo ""
+echo "----------------------------------------------------------------------"
+echo "NOTE: If you modified rewrite_rules.conf, reload the mirror table:"
+echo "  scripts/reload_rewrite_rules.sh"
+echo "Or via SQL:"
+echo "  SELECT hafbe_backend.load_rewrite_rules('$(cat $REWRITES_FILE 2>/dev/null | sed "s/'/''/g")');"
+echo "Verify with:"
+echo "  SELECT * FROM hafbe_endpoints.get_endpoints_consistency();"
+echo "----------------------------------------------------------------------"

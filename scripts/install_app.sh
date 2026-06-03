@@ -157,6 +157,7 @@ setup_api() {
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/types/operations.sql"
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/types/transactions.sql"
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/types/proposals.sql"
+  psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/types/metadata.sql"
 
   echo "Installing backend utilities..."
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/backend/utilities/constants.sql"
@@ -196,10 +197,12 @@ setup_api() {
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/other/get_input_type.sql"
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/other/get_latest_blocks.sql"
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/other/get_hafbe_last_synced_block.sql"
+  psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/other/get_endpoints_metadata.sql"
+  psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/other/get_endpoints_consistency.sql"
+  psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/other/load_rewrite_rules.sql"
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/witnesses/get_witness_voters_num.sql"
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/witnesses/get_witness_voters.sql"
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/witnesses/get_witness_votes_history.sql"
-  psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/witnesses/get_witness_votes_timeline.sql"
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/witnesses/get_witness.sql"
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/witnesses/get_witnesses.sql"
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/proposals/get_proposal_votes_history.sql"
@@ -216,6 +219,18 @@ setup_api() {
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -c "SET ROLE hafbe_owner;GRANT SELECT ON ALL TABLES IN SCHEMA hafbe_backend TO hafbe_user;"
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -c "SET ROLE hafbe_owner;GRANT SELECT ON ALL TABLES IN SCHEMA hafbe_endpoints TO hafbe_user;"
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -c "SET ROLE hafbe_owner;GRANT SELECT ON ALL TABLES IN SCHEMA hafbe_app TO hafbe_user;"
+
+  # IMPORTANT: The rewrite rules are copied into a DB mirror table
+  # (hafbe_backend.rewrite_rules) so the consistency self-check can
+  # compare them to both the OpenAPI spec and pg_proc.  If you later
+  # edit endpoints/rewrite_rules.conf you MUST reload the mirror:
+  #   scripts/reload_rewrite_rules.sh
+  # Or manually:
+  #   SELECT hafbe_backend.load_rewrite_rules(pg_read_file('/path/to/rewrite_rules.conf'));
+  # Otherwise /metadata/consistency will report `rewrite_rules_stale`.
+  echo "Loading rewrite rules for consistency self-check..."
+  REWRITE_CONTENT=$(cat "$HAFBE_DIR/endpoints/rewrite_rules.conf")
+  psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -c "SET ROLE hafbe_owner;SELECT hafbe_backend.load_rewrite_rules('$(echo "$REWRITE_CONTENT" | sed "s/'/''/g")');"
 
   # Allow hived to fullfil vacuum full requests
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -c "SET ROLE hafbe_owner;GRANT MAINTAIN ON ALL TABLES IN SCHEMA hafbe_app TO hived_group;"
