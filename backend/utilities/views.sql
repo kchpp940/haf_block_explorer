@@ -319,6 +319,53 @@ SELECT
 FROM hafbe_app.witness_votes_history t;
 
 /*
+ * witness_votes_history_resolved_view: Witness vote history with resolved vests.
+ *
+ * Extends witness_votes_history_view with account names, timestamps, and
+ * fully resolved vest stats (own + proxied). Reuses the same vest resolution
+ * logic that get_witness_votes_history used to do inline:
+ *   1. JOIN hive.accounts_view for voter names
+ *   2. JOIN hive.blocks_view for timestamps
+ *   3. LEFT JOIN account_vest_stats_cache for current vest stats
+ *   4. LEFT JOIN expired_voter_stats_view as fallback for inactive voters
+ *
+ * This is the single source of truth for resolved witness vote history.
+ * Both get_witness_votes_history and get_witness_votes_timeline read from
+ * this view to avoid duplicating proxy/expired handling logic.
+ *
+ * COLUMNS:
+ *   witness_id      - The witness being voted for
+ *   voter_id        - The account casting the vote
+ *   voter_name      - Name of the account casting the vote
+ *   approve         - TRUE for vote, FALSE for unvote
+ *   vests           - Total voting power (own + proxied), already resolved
+ *   account_vests   - Voter's own vesting shares, already resolved
+ *   proxied_vests   - Vests proxied to this account, already resolved
+ *   timestamp       - Block timestamp of the vote
+ *   source_op       - The operation ID that caused this change
+ *   source_op_block - Block number extracted from source_op
+ *   op_type_id      - Operation type extracted from source_op
+ */
+CREATE OR REPLACE VIEW hafbe_backend.witness_votes_history_resolved_view AS
+SELECT
+  wvh.witness_id,
+  wvh.voter_id,
+  av.name AS voter_name,
+  wvh.approve,
+  COALESCE(avs.vests, evs.vests) AS vests,
+  COALESCE(avs.account_vests, evs.account_vests) AS account_vests,
+  COALESCE(avs.proxied_vests, evs.proxied_vests) AS proxied_vests,
+  bv.created_at AS timestamp,
+  wvh.source_op,
+  wvh.source_op_block,
+  wvh.op_type_id
+FROM hafbe_backend.witness_votes_history_view wvh
+JOIN hive.accounts_view av ON av.id = wvh.voter_id
+JOIN hive.blocks_view bv ON bv.num = wvh.source_op_block
+LEFT JOIN hafbe_app.account_vest_stats_cache avs ON avs.account_id = wvh.voter_id
+LEFT JOIN hafbe_backend.expired_voter_stats_view evs ON evs.account_id = wvh.voter_id AND avs.account_id IS NULL;
+
+/*
  * current_witness_votes_view: Current witness votes with computed block numbers.
  *
  * Wraps hafbe_app.current_witness_votes and extracts block_num and op_type_id

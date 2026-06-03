@@ -199,31 +199,4 @@ CREATE TYPE hafbe_backend.granularity AS ENUM (
 );
 -- openapi-generated-code-end
 
-----------------------------------------------------------------------
-
-/** openapi:components:schemas
-hafbe_backend.operation_group:
-  type: string
-  enum:
-    - governance
-    - token
-    - account
-    - comment
-    - witness
-    - market
-    - other
- */
--- openapi-generated-code-begin
-DROP TYPE IF EXISTS hafbe_backend.operation_group CASCADE;
-CREATE TYPE hafbe_backend.operation_group AS ENUM (
-    'governance',
-    'token',
-    'account',
-    'comment',
-    'witness',
-    'market',
-    'other'
-);
--- openapi-generated-code-end
-
 RESET ROLE;

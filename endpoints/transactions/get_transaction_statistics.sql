@@ -7,8 +7,7 @@ SET ROLE hafbe_owner;
       - Transactions
     summary: Aggregated transaction statistics
     description: |
-      History of amount of transactions per day, month or year, broken down
-      by operation group (governance, token, account, comment, witness, market, other).
+      History of amount of transactions per day, month or year.
 
       SQL example
       * `SELECT * FROM hafbe_endpoints.get_transaction_statistics();`
@@ -77,55 +76,23 @@ SET ROLE hafbe_owner;
           * `2016-09-15 19:47:21`
 
           * `5000000`
-      - in: query
-        name: operation-group
-        required: false
-        schema:
-          type: array
-          items:
-            $ref: '#/components/schemas/hafbe_backend.operation_group'
-          default: NULL
-        style: form
-        explode: false
-        description: |
-          Optional filter to include only specific operation groups.
-          Omit to return all groups.
-
-          Operation groups:
-
-          * governance - Proposals, witness voting, governance-related operations
-
-          * token - Transfers, power up/down, rewards
-
-          * account - Account creation, recovery, profile updates
-
-          * comment - Posts, comments, votes
-
-          * witness - Block production, feed publishing
-
-          * market - Limit orders
-
-          * other - All other operations
     responses:
       '200':
         description: |
-          Returns array of `hafbe_backend.operation_group_stats`.
-          Each period contains total_transactions, total_operations,
-          and a `groups` array with per-group breakdown.
+          Balance change
+
+          * Returns array of `hafbe_backend.transaction_stats`
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/hafbe_backend.array_of_operation_group_stats'
+              $ref: '#/components/schemas/hafbe_backend.array_of_transaction_stats'
             example: [
               {
                 "date": "2017-01-01T00:00:00",
-                "total_transactions": 6961192,
-                "total_operations": 12345678,
-                "groups": [
-                  {"group": "comment", "op_count": 5000000, "trx_count": 0},
-                  {"group": "governance", "op_count": 1200000, "trx_count": 0},
-                  {"group": "token", "op_count": 3000000, "trx_count": 0}
-                ],
+                "trx_count": 6961192,
+                "avg_trx": 1,
+                "min_trx": 0,
+                "max_trx": 89,
                 "last_block_num": 5000000
               }
             ]
@@ -139,10 +106,9 @@ CREATE OR REPLACE FUNCTION hafbe_endpoints.get_transaction_statistics(
     "granularity" hafbe_backend.granularity = 'yearly',
     "direction" hafbe_backend.sort_direction = 'desc',
     "from-block" TEXT = NULL,
-    "to-block" TEXT = NULL,
-    "operation-group" hafbe_backend.operation_group[] = NULL
+    "to-block" TEXT = NULL
 )
-RETURNS SETOF hafbe_backend.operation_group_stats 
+RETURNS SETOF hafbe_backend.transaction_stats 
 -- openapi-generated-code-end
 LANGUAGE 'plpgsql'
 SET jit = OFF
@@ -163,16 +129,16 @@ BEGIN
   RETURN QUERY (
     SELECT
       fb.date,
-      fb.total_transactions,
-      fb.total_operations,
-      fb.groups,
+      fb.trx_count,
+      fb.avg_trx,
+      fb.min_trx,
+      fb.max_trx,
       fb.last_block_num
-    FROM hafbe_backend.get_operation_group_aggregation(
+    FROM hafbe_backend.get_transaction_aggregation(
       "granularity",
       "direction",
       _block_range.first_block,
-      _block_range.last_block,
-      "operation-group"
+      _block_range.last_block
     ) fb
   );
 

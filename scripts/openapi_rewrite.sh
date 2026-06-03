@@ -36,6 +36,7 @@ ENDPOINTS_IN_ORDER="
 ../$endpoints/witnesses/get_witness_voters.sql
 ../$endpoints/witnesses/get_witness_voters_num.sql
 ../$endpoints/witnesses/get_witness_votes_history.sql
+../$endpoints/witnesses/get_witness_votes_timeline.sql
 ../$endpoints/accounts/get_account.sql
 ../$endpoints/accounts/get_account_authority.sql
 ../$endpoints/accounts/get_account_proxies_power.sql

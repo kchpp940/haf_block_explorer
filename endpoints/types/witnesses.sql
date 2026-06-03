@@ -257,4 +257,74 @@ CREATE TYPE hafbe_backend.witness_votes_history AS (
 );
 -- openapi-generated-code-end
 
+/** openapi:components:schemas
+hafbe_backend.witness_votes_timeline_record:
+  type: object
+  properties:
+    date:
+      type: string
+      format: date
+      description: the calendar date (UTC) of the aggregated vote changes
+    new_votes:
+      type: integer
+      description: >-
+        number of approve votes cast on this date (accounts that voted for
+        the witness)
+    revoked_votes:
+      type: integer
+      description: >-
+        number of unapprove votes on this date (accounts that revoked their
+        vote for the witness, including votes removed due to proxy changes
+        or account expiration)
+    proxy_vests_change:
+      type: string
+      description: >-
+        net change in proxied vests on this date. Positive means more
+        proxied vests were added than removed; negative means more were
+        removed. Includes vests from accounts that set a proxy to a voter
+        of this witness.
+    net_vests:
+      type: string
+      description: >-
+        net change in total vests on this date. Calculated as total vests
+        from approve votes minus total vests from revoke votes. A positive
+        value indicates the witness gained voting power; negative indicates
+        a loss.
+ */
+-- openapi-generated-code-begin
+DROP TYPE IF EXISTS hafbe_backend.witness_votes_timeline_record CASCADE;
+CREATE TYPE hafbe_backend.witness_votes_timeline_record AS (
+    "date" DATE,
+    "new_votes" INT,
+    "revoked_votes" INT,
+    "proxy_vests_change" TEXT,
+    "net_vests" TEXT
+);
+-- openapi-generated-code-end
+
+/** openapi:components:schemas
+hafbe_backend.witness_votes_timeline:
+  type: object
+  properties:
+    total_days:
+      type: integer
+      description: Total number of days with vote activity
+    total_pages:
+      type: integer
+      description: Total number of pages
+    timeline:
+      type: array
+      items:
+        $ref: '#/components/schemas/hafbe_backend.witness_votes_timeline_record'
+      description: Daily aggregated vote changes for the witness
+ */
+-- openapi-generated-code-begin
+DROP TYPE IF EXISTS hafbe_backend.witness_votes_timeline CASCADE;
+CREATE TYPE hafbe_backend.witness_votes_timeline AS (
+    "total_days" INT,
+    "total_pages" INT,
+    "timeline" hafbe_backend.witness_votes_timeline_record[]
+);
+-- openapi-generated-code-end
+
 RESET ROLE;
