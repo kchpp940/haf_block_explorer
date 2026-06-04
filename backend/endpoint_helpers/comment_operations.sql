@@ -178,4 +178,102 @@ BEGIN
 END
 $$;
 
+-- =============================================================================
+-- Endpoint Helper Function
+-- =============================================================================
+
+/*
+ * get_comment_operations_endpoint: Retrieves comment operations with pagination.
+ *
+ * Consolidated helper for the get_comment_operations endpoint. Uses the
+ * account_query_context for account validation and pagination, then
+ * retrieves and assembles the operation history.
+ *
+ * PARAMETERS:
+ *   _account_name    - The account name (author of the comment)
+ *   _permlink        - The comment permlink
+ *   _operation_types - Comma-separated operation type IDs (NULL = all comment types)
+ *   _page            - Page number (1-based)
+ *   _page_size       - Number of operations per page
+ *   _order_is        - Sort direction ('asc' or 'desc')
+ *   _body_limit      - Maximum length for operation body (0 = no limit)
+ *   _max_page_size   - Maximum allowed page size for this endpoint
+ *
+ * RETURNS: hafbe_backend.operation_history with paginated operations
+ *
+ * NOTE: Cache control and validations are handled by the context builder.
+ */
+CREATE OR REPLACE FUNCTION hafbe_backend.get_comment_operations_endpoint(
+    _account_name    TEXT,
+    _permlink        TEXT,
+    _operation_types TEXT,
+    _page            INT,
+    _page_size       INT,
+    _order_is        hafbe_backend.sort_direction,
+    _body_limit      INT,
+    _max_page_size   INT
+)
+RETURNS hafbe_backend.operation_history
+LANGUAGE 'plpgsql' STABLE
+SET join_collapse_limit = 16
+SET from_collapse_limit = 16
+SET JIT = OFF
+SET enable_hashjoin = OFF
+SET plan_cache_mode = force_custom_plan
+AS
+$$
+DECLARE
+    __operation_types INT[];
+    __ctx             hafbe_backend.account_query_context;
+    __ops_count       INT;
+    __total_pages     INT;
+    __result          hafbe_backend.operation[];
+    __flags           hafbe_backend.account_validation_flags := (TRUE, FALSE, TRUE);
+BEGIN
+    __operation_types := hafbe_backend.get_comment_history_operation_types(_operation_types);
+
+    __ctx := hafbe_backend.account_context_build_paginated(
+        _account_name, _page, _page_size, _max_page_size, __flags
+    );
+
+    __ops_count   := hafbe_backend.get_comment_operations_count(
+        __ctx.account_name, _permlink, __operation_types
+    );
+    __total_pages := hafbe_backend.account_context_calculate_total_pages(
+        __ops_count, __ctx.page_size
+    );
+
+    PERFORM hafbe_backend.validate_page(__ctx.page, __total_pages);
+
+    __result := array_agg(row ORDER BY
+        (CASE WHEN _order_is = 'desc' THEN row.operation_id::BIGINT ELSE NULL END) DESC,
+        (CASE WHEN _order_is = 'asc' THEN row.operation_id::BIGINT ELSE NULL END) ASC
+    ) FROM (
+        SELECT
+            ba.op,
+            ba.block,
+            ba.trx_id,
+            ba.op_pos,
+            ba.op_type_id,
+            ba.timestamp,
+            ba.virtual_op,
+            ba.operation_id,
+            ba.trx_in_block
+        FROM hafbe_backend.get_comment_operations(
+            __ctx.account_name,
+            _permlink,
+            __operation_types,
+            __ctx.page,
+            __ctx.page_size,
+            _order_is,
+            _body_limit
+        ) ba
+    ) row;
+
+    RETURN hafbe_backend.account_context_build_operation_history(
+        __ops_count, __total_pages, __result
+    );
+END
+$$;
+
 RESET ROLE;

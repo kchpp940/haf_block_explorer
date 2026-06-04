@@ -139,39 +139,19 @@ SET join_collapse_limit = 16
 SET from_collapse_limit = 16
 SET JIT = OFF
 SET enable_hashjoin = OFF
-SET plan_cache_mode = force_custom_plan -- FIXME
+SET plan_cache_mode = force_custom_plan
 AS
 $$
-DECLARE
-  _account_id INT                := hafah_backend.get_account_id("account-name", TRUE);
-  _block_range hive.blocks_range := hive.convert_to_blocks_range("from-block","to-block");
-  _head_block_num INT            := hafbe_backend.get_haf_head_block();
-
-  __block_range hafbe_backend.blocksearch_filter_return;
 BEGIN
-  PERFORM hafbe_backend.validate_limit("page-size", 100);
-  PERFORM hafbe_backend.validate_negative_limit("page-size");
-  PERFORM hafbe_backend.validate_negative_page("page");
-  PERFORM hafbe_backend.validate_comment_search_indexes();
-  PERFORM hafbe_backend.validate_block_num_too_high(_block_range.first_block, _head_block_num);
-
-  IF _block_range.last_block <= hive.app_get_irreversible_block() AND _block_range.last_block IS NOT NULL THEN
-    PERFORM set_config('response.headers', '[{"Cache-Control": "public, max-age=31536000"}]', true);
-  ELSE
-    PERFORM set_config('response.headers', '[{"Cache-Control": "public, max-age=2"}]', true);
-  END IF;
-
-  __block_range := hafbe_backend.blocksearch_range(_block_range.first_block, _block_range.last_block, _head_block_num);
-
-  RETURN hafbe_backend.get_comment_permlinks(
-    "account-name",
-    "comment-type",
-    "page",
-    "page-size",
-    __block_range.from_block,
-    __block_range.to_block
-  );
-
+    RETURN hafbe_backend.get_comment_permlinks_endpoint(
+        "account-name",
+        "comment-type",
+        "page",
+        "page-size",
+        "from-block",
+        "to-block",
+        100
+    );
 END
 $$;
 

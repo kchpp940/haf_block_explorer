@@ -83,20 +83,8 @@ SET join_collapse_limit = 16
 SET from_collapse_limit = 16
 AS
 $$
-DECLARE
-  _account_id INT := hafah_backend.get_account_id("account-name", TRUE);
 BEGIN
-  -- 2s because this endpoint result is live account parameters and balances 
-  PERFORM set_config('response.headers', '[{"Cache-Control": "public, max-age=2"}]', true);
-
-  RETURN (
-    hafbe_backend.get_account_authority(_account_id, 'OWNER'),
-    hafbe_backend.get_account_authority(_account_id, 'ACTIVE'),
-    hafbe_backend.get_account_authority(_account_id, 'POSTING'),
-    hafbe_backend.get_account_memo(_account_id),
-    hafbe_backend.get_account_witness_signing(_account_id)
-  )::hafbe_backend.account_authority;
-
+    RETURN hafbe_backend.get_account_authority_endpoint("account-name");
 END
 $$;
 
