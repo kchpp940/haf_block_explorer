@@ -306,36 +306,43 @@ DECLARE
 
   _key_content TEXT[]               := NULL;
   _set_of_keys JSON                 := NULL;
-  __ctx hafbe_backend.blocksearch_context;
 BEGIN
-  -- Parse path filters if provided (required before creating context)
+  PERFORM hafbe_backend.validate_limit("page-size", 1000);
+  PERFORM hafbe_backend.validate_negative_limit("page-size");
+  PERFORM hafbe_backend.validate_negative_page("page");
+  PERFORM hafbe_backend.validate_block_num_too_high(_block_range.first_block, _head_block_num);
+
   IF hafah_backend.is_path_filter_not_empty("path-filter") THEN
+    -- if path-filter is not empty, validate if extra indexes are available
+    -- and if the operation type is single
+    PERFORM hafbe_backend.validate_block_search_indexes();
+    PERFORM hafbe_backend.validate_single_operation_type(_operation_types);
+
     SELECT param_json::JSON, param_text::TEXT[]
     INTO _set_of_keys, _key_content
     FROM hafah_backend.parse_path_filters("path-filter");
+
+    PERFORM hafbe_backend.validate_path_filter_keys(_operation_types, _set_of_keys);
   END IF;
 
-  -- Create routing context (ALL decisions made here, declaratively)
-  __ctx := hafbe_backend.blocksearch_create_context(
+  IF _block_range.last_block <= hive.app_get_irreversible_block() AND _block_range.last_block IS NOT NULL THEN
+    PERFORM set_config('response.headers', '[{"Cache-Control": "public, max-age=31536000"}]', true);
+  ELSE
+    PERFORM set_config('response.headers', '[{"Cache-Control": "public, max-age=2"}]', true);
+  END IF;
+
+  RETURN hafbe_backend.get_blocks_by_ops(
     _operation_types,
     _account_id,
+    "direction",
     _block_range.first_block,
     _block_range.last_block,
-    "direction",
     "page",
     "page-size",
     _key_content,
     _set_of_keys
   );
 
-  -- SINGLE POINT OF VALIDATION (all checks centralized in routing module)
-  PERFORM hafbe_backend.blocksearch_validate(__ctx, _head_block_num);
-
-  -- SINGLE POINT OF CACHE CONFIGURATION
-  PERFORM hafbe_backend.blocksearch_set_cache_headers(__ctx);
-
-  -- Execute the complete pipeline (gatherer + build result)
-  RETURN hafbe_backend.blocksearch_execute(__ctx);
 END
 $$;
 

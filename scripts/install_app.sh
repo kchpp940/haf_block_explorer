@@ -3,8 +3,12 @@
 set -euo pipefail
 
 # Script location
-SCRIPT_DIR="$(realpath "$(dirname "${BASH_SOURCE[0]}")")"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HAFBE_DIR="$SCRIPT_DIR/.."
+ENDPOINTS_DIR="$HAFBE_DIR/endpoints"
+
+# shellcheck source=scripts/endpoints_manifest.sh
+source "$SCRIPT_DIR/endpoints_manifest.sh"
 
 POSTGRES_HOST=${POSTGRES_HOST:-"localhost"}
 POSTGRES_PORT=${POSTGRES_PORT:-5432}
@@ -167,7 +171,6 @@ setup_api() {
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/backend/utilities/blocks.sql"
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/backend/utilities/witness.sql"
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/backend/utilities/blocksearch.sql"
-  psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/backend/utilities/blocksearch_routing.sql"
 
   echo "Installing backend helpers..."
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/backend/endpoint_helpers/blocksearch_filters.sql"
@@ -184,27 +187,13 @@ setup_api() {
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/backend/endpoint_helpers/proposal.sql"
 
   echo "Installing REST API endpoints..."
-  psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/accounts/get_account_authority.sql"
-  psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/accounts/get_account.sql"
-  psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/accounts/get_account_proxies_power.sql"
-  psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/accounts/get_comment_operations.sql"
-  psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/accounts/get_comment_permlinks.sql"
-  psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/accounts/get_total_wallet_addresses.sql"
-  psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/block-search/get_block_by_op.sql"
-  psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/transactions/get_transaction_statistics.sql"
-  psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/transactions/get_operation_type_statistics.sql"
-  psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/other/get_hafbe_version.sql"
-  psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/other/get_input_type.sql"
-  psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/other/get_latest_blocks.sql"
-  psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/other/get_hafbe_last_synced_block.sql"
-  psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/witnesses/get_witness_voters_num.sql"
-  psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/witnesses/get_witness_voters.sql"
-  psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/witnesses/get_witness_votes_history.sql"
-  psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/witnesses/get_witness.sql"
-  psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/witnesses/get_witnesses.sql"
-  psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/proposals/get_proposal_votes_history.sql"
-  psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/proposals/get_proposals.sql"
-  psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/proposals/get_proposal_votes.sql"
+
+  validate_manifest
+  while IFS= read -r sql_file; do
+    [[ -n "$sql_file" ]] || continue
+    echo "  Installing $sql_file..."
+    psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/$sql_file"
+  done < <(get_endpoints_for_install)
 
   echo "Setting application version..."
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/scripts/set_version_in_sql.pgsql"

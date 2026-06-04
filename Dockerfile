@@ -20,6 +20,7 @@ USER hived
 COPY --chown=hived:users . /home/hived/src
 WORKDIR /home/hived/src
 RUN scripts/generate_version_sql.sh $(pwd)
+RUN scripts/generate_rewrite_rules.sh
 RUN find . -name 'endpoint_schema.sql' -o -name 'hafah_openapi.sql' | while read -r f; do \
          sed -i 's|"version": "[^"]*"|"version": "'"$API_VERSION"'"|' "$f"; \
          sed -i 's|^  version: .*|  version: '"$API_VERSION"'|' "$f"; \
@@ -54,7 +55,7 @@ USER root
 
 RUN <<EOF
   set -e
-  apk --no-cache add curl
+  apk --no-cache add curl jq
   deluser haf_admin 2>/dev/null || true
   adduser -D -u 1000 -G users -h /home/hived hived
   mkdir -p /home/hived/haf_block_explorer/scripts
@@ -77,6 +78,9 @@ COPY --chown=hived:users scripts/install_app.sh /home/hived/haf_block_explorer/s
 COPY --chown=hived:users scripts/process_blocks.sh /home/hived/haf_block_explorer/scripts/process_blocks.sh
 COPY --chown=hived:users scripts/uninstall_app.sh /home/hived/haf_block_explorer/scripts/uninstall_app.sh
 COPY --chown=hived:users scripts/generate_version_sql.sh /home/hived/haf_block_explorer/scripts/generate_version_sql.sh
+COPY --chown=hived:users scripts/endpoints_manifest.sh /home/hived/haf_block_explorer/scripts/endpoints_manifest.sh
+COPY --chown=hived:users scripts/generate_rewrite_rules.sh /home/hived/haf_block_explorer/scripts/generate_rewrite_rules.sh
+COPY --chown=hived:users scripts/openapi_rewrite.sh /home/hived/haf_block_explorer/scripts/openapi_rewrite.sh
 COPY --chown=hived:users docker/scripts/docker_entrypoint.sh /home/hived/haf_block_explorer/scripts/docker_entrypoint.sh
 COPY --from=version-calculcation --chown=hived:users /home/hived/src/scripts/set_version_in_sql.pgsql /home/hived/haf_block_explorer/scripts/set_version_in_sql.pgsql
 

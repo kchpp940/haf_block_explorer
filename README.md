@@ -621,6 +621,89 @@ vim backend/endpoint_helpers/your_function.sql
 cd tests/tavern/patterns-mainnet && pytest -n 8 .
 ```
 
+### Unified Endpoints Manifest
+
+HAFBE uses a single source of truth for API endpoint definitions: [`endpoints/endpoints.json`](endpoints/endpoints.json). Each endpoint entry contains **all necessary metadata** and three priority fields that drive ordering for different use cases:
+
+1. **Database installation** (`scripts/install_app.sh`) - sorted by `install_priority`
+2. **OpenAPI/Swagger generation** (`scripts/openapi_rewrite.sh`) - sorted by `openapi_priority`  
+3. **Nginx rewrite rules** (`scripts/generate_rewrite_rules.sh`) - sorted by `rewrite_priority`
+
+**Prerequisites:**
+- **`jq`** (recommended): Install with `brew install jq` (macOS) or `sudo apk add jq` (Alpine/Docker)
+- **Python 3** (fallback): If `jq` is unavailable, scripts automatically fall back to Python-based JSON parsing
+- **Docker/CI**: `jq` is pre-installed in the Docker image via `apk add jq`
+
+**Adding a new endpoint:**
+
+1. Create the SQL function file in the appropriate category directory under `endpoints/`
+
+2. Add **one entry** to the `endpoints` array in `endpoints/endpoints.json`:
+   ```json
+   {
+     "name": "get_account",
+     "category": "accounts",
+     "sql_file": "accounts/get_account.sql",
+     "rpc_path": "get_account",
+     "api_path": "/accounts/{account-name}",
+     "rewrite_rule": "rewrite ^/accounts/([^/]+) /rpc/get_account?account-name=$1 break;",
+     "rewrite_comment": "# endpoint for get /accounts/{account-name}",
+     "install_priority": 2,
+     "openapi_priority": 6,
+     "rewrite_priority": 16
+   }
+   ```
+
+   Priority fields determine ordering (lower numbers appear first):
+   - `install_priority`: Database installation order
+   - `openapi_priority`: Order in Swagger/OpenAPI docs
+   - `rewrite_priority`: Nginx rule evaluation order (more specific rules should have lower numbers)
+
+3. Regenerate the rewrite rules:
+   ```bash
+   ./scripts/generate_rewrite_rules.sh
+   ```
+
+4. Run the install script to deploy:
+   ```bash
+   ./scripts/install_app.sh --host=localhost
+   ```
+
+All three systems automatically derive their behavior from this single entry, eliminating manual synchronization across multiple files.
+
+### Manifest Self-Validation
+
+A built-in validation gate (`validate_manifest`) runs automatically before:
+- `scripts/install_app.sh` — before database installation
+- `scripts/openapi_rewrite.sh` — before OpenAPI schema generation  
+- `scripts/generate_rewrite_rules.sh` — before nginx rewrite generation
+- Docker build (`version-calculcation` stage) — before image build
+
+**Checks performed:**
+
+| Check | Description |
+|-------|-------------|
+| **Required fields** | All 10 mandatory fields present on every endpoint |
+| **Priority uniqueness** | `install_priority`/`openapi_priority`/`rewrite_priority` have no duplicates or gaps |
+| **sql_file exists** | Referenced SQL files actually exist on disk |
+| **rpc_path matches** | `rpc_path` matches the `CREATE OR REPLACE FUNCTION` name in SQL |
+| **OpenAPI paths completeness** | All `rpc_path` entries in manifest have corresponding `operationId` in `endpoint_schema.sql` `paths` |
+| **Response schema references** | All `$ref` schemas in endpoint SQL responses exist in `endpoint_schema.sql` `components` |
+| **rewrite_rules.conf sync** | Generated rewrite rules match the checked-in file |
+
+**Three-Link End-to-End Coverage:**
+```
+endpoints.json
+    ├─→ install_priority → install_app.sh database installation [VALIDATED]
+    ├─→ openapi_priority → openapi_rewrite.sh paths/components [VALIDATED]
+    └─→ rewrite_priority → nginx rewrite_rules.conf          [VALIDATED]
+```
+
+To manually run validation:
+```bash
+ENDPOINTS_DIR="$(pwd)/endpoints" source scripts/endpoints_manifest.sh && validate_manifest
+```
+
 ---
 
 ## License
