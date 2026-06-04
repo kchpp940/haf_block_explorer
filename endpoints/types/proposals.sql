@@ -217,4 +217,59 @@ CREATE TYPE hafbe_backend.proposal_votes_history AS (
 );
 -- openapi-generated-code-end
 
+----------------------------------------------------------------------
+
+/** openapi:components:schemas
+hafbe_backend.proposal_vote_stats_history_record:
+  type: object
+  properties:
+    date:
+      type: string
+      format: date-time
+      description: the end of the time period
+    total_votes:
+      type: string
+      description: stake-weighted total votes (vests) at period end
+    voters_num:
+      type: integer
+      description: number of unique voters at period end
+    last_block_num:
+      type: integer
+      description: last block number included in this period
+ */
+-- openapi-generated-code-begin
+DROP TYPE IF EXISTS hafbe_backend.proposal_vote_stats_history_record CASCADE;
+CREATE TYPE hafbe_backend.proposal_vote_stats_history_record AS (
+    "date" TIMESTAMP,
+    "total_votes" TEXT,
+    "voters_num" INT,
+    "last_block_num" INT
+);
+-- openapi-generated-code-end
+
+/** openapi:components:schemas
+hafbe_backend.proposal_vote_stats_history:
+  type: object
+  properties:
+    total_periods:
+      type: integer
+      description: Total number of time periods
+    total_pages:
+      type: integer
+      description: Total number of pages
+    history:
+      type: array
+      items:
+        $ref: '#/components/schemas/hafbe_backend.proposal_vote_stats_history_record'
+      description: Historical vote stats data
+ */
+-- openapi-generated-code-begin
+DROP TYPE IF EXISTS hafbe_backend.proposal_vote_stats_history CASCADE;
+CREATE TYPE hafbe_backend.proposal_vote_stats_history AS (
+    "total_periods" INT,
+    "total_pages" INT,
+    "history" hafbe_backend.proposal_vote_stats_history_record[]
+);
+-- openapi-generated-code-end
+
 RESET ROLE;

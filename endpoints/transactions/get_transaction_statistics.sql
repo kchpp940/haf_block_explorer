@@ -115,12 +115,9 @@ SET jit = OFF
 AS
 $$
 DECLARE
-  _block_range hive.blocks_range := hive.convert_to_blocks_range("from-block","to-block");
-  _head_block_num INT            := hafbe_backend.get_hafbe_head_block();
+  _ctx hafbe_backend.list_context := hafbe_backend.resolve_list_context("from-block", "to-block", 1, 1, 1);
 BEGIN
-  PERFORM hafbe_backend.validate_block_num_too_high(_block_range.first_block, _head_block_num);
-
-  IF _block_range.last_block <= hive.app_get_irreversible_block() AND _block_range.last_block IS NOT NULL THEN
+  IF _ctx.block_range.last_block <= hive.app_get_irreversible_block() AND _ctx.block_range.last_block IS NOT NULL THEN
     PERFORM set_config('response.headers', '[{"Cache-Control": "public, max-age=31536000"}]', true);
   ELSE
     PERFORM set_config('response.headers', '[{"Cache-Control": "public, max-age=2"}]', true);
@@ -137,8 +134,8 @@ BEGIN
     FROM hafbe_backend.get_transaction_aggregation(
       "granularity",
       "direction",
-      _block_range.first_block,
-      _block_range.last_block
+      _ctx.block_range.first_block,
+      _ctx.block_range.last_block
     ) fb
   );
 

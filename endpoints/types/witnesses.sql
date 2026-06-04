@@ -257,4 +257,75 @@ CREATE TYPE hafbe_backend.witness_votes_history AS (
 );
 -- openapi-generated-code-end
 
+----------------------------------------------------------------------
+
+/** openapi:components:schemas
+hafbe_backend.witness_votes_timeline_record:
+  type: object
+  properties:
+    date:
+      type: string
+      format: date-time
+      description: the end of the time period
+    votes_added:
+      type: integer
+      description: number of votes added in this period
+    votes_removed:
+      type: integer
+      description: number of votes removed in this period
+    net_votes_change:
+      type: integer
+      description: net change in vote count (added - removed)
+    vests_added:
+      type: string
+      description: total vests added in this period
+    vests_removed:
+      type: string
+      description: total vests removed in this period
+    net_vests_change:
+      type: string
+      description: net change in vests (added - removed)
+    last_block_num:
+      type: integer
+      description: last block number included in this period
+ */
+-- openapi-generated-code-begin
+DROP TYPE IF EXISTS hafbe_backend.witness_votes_timeline_record CASCADE;
+CREATE TYPE hafbe_backend.witness_votes_timeline_record AS (
+    "date" TIMESTAMP,
+    "votes_added" INT,
+    "votes_removed" INT,
+    "net_votes_change" INT,
+    "vests_added" TEXT,
+    "vests_removed" TEXT,
+    "net_vests_change" TEXT,
+    "last_block_num" INT
+);
+-- openapi-generated-code-end
+
+/** openapi:components:schemas
+hafbe_backend.witness_votes_timeline:
+  type: object
+  properties:
+    total_periods:
+      type: integer
+      description: Total number of time periods
+    total_pages:
+      type: integer
+      description: Total number of pages
+    timeline:
+      type: array
+      items:
+        $ref: '#/components/schemas/hafbe_backend.witness_votes_timeline_record'
+      description: Timeline data
+ */
+-- openapi-generated-code-begin
+DROP TYPE IF EXISTS hafbe_backend.witness_votes_timeline CASCADE;
+CREATE TYPE hafbe_backend.witness_votes_timeline AS (
+    "total_periods" INT,
+    "total_pages" INT,
+    "timeline" hafbe_backend.witness_votes_timeline_record[]
+);
+-- openapi-generated-code-end
+
 RESET ROLE;

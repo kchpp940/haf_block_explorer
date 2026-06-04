@@ -81,6 +81,7 @@ CREATE OR REPLACE FUNCTION hafbe_endpoints.get_account(...)
 | `GET /witnesses/{account-name}/voters` | `get_witness_voters` | Accounts voting for witness |
 | `GET /witnesses/{account-name}/voters/num` | `get_witness_voters_num` | Count of witness voters |
 | `GET /witnesses/{account-name}/votes-history` | `get_witness_votes_history` | Historical vote changes |
+| `GET /witnesses/{account-name}/votes-timeline` | `get_witness_votes_timeline` | Vote changes timeline (daily/monthly/yearly aggregation) |
 
 ### Proposal Endpoints
 
@@ -140,11 +141,13 @@ endpoints/
 │   ├── get_witnesses.sql
 │   ├── get_witness_voters.sql
 │   ├── get_witness_voters_num.sql
-│   └── get_witness_votes_history.sql
+│   ├── get_witness_votes_history.sql
+│   └── get_witness_votes_timeline.sql
 ├── proposals/               # Proposal endpoint definitions
 │   ├── get_proposals.sql
 │   ├── get_proposal_votes.sql
-│   └── get_proposal_votes_history.sql
+│   ├── get_proposal_votes_history.sql
+│   └── get_proposal_vote_stats_history.sql
 ├── block-search/            # Block search endpoints
 │   └── get_block_by_op.sql
 ├── transactions/            # Transaction endpoints

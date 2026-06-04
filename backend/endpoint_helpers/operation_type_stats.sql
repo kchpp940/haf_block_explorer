@@ -152,62 +152,16 @@ LANGUAGE 'plpgsql' STABLE
 AS
 $$
 DECLARE
-  __from                INT;
-  __to                  INT;
-  __from_timestamp      TIMESTAMP;
-  __to_timestamp        TIMESTAMP;
-  __granularity         TEXT;
-  __one_period          INTERVAL;
-  __hafbe_current_block INT := (SELECT current_block_num FROM hafd.contexts WHERE name = 'hafbe_app');
+  _ctx hafbe_backend.period_context := hafbe_backend.resolve_period_context(_granularity, _from_block, _to_block);
 BEGIN
-  -- Normalize block range (block_num or timestamp -> block_num)
-  SELECT from_block, to_block
-  INTO __from, __to
-  FROM hafbe_backend.blocksearch_range(_from_block, _to_block, __hafbe_current_block);
-
-  __granularity := (
-    CASE
-      WHEN _granularity = 'daily'   THEN 'day'
-      WHEN _granularity = 'monthly' THEN 'month'
-      WHEN _granularity = 'yearly'  THEN 'year'
-      ELSE NULL
-    END
-  );
-
-  __from_timestamp := DATE_TRUNC(
-    __granularity,
-    (SELECT b.created_at FROM hive.blocks_view b WHERE b.num = __from)::TIMESTAMP
-  );
-  __to_timestamp := DATE_TRUNC(
-    __granularity,
-    (SELECT b.created_at FROM hive.blocks_view b WHERE b.num = __to)::TIMESTAMP
-  );
-
-  __one_period := ('1 ' || __granularity)::INTERVAL;
-
   RETURN QUERY (
-    /*
-     * Complete period series for the requested window, so periods with no
-     * data still appear as a row in the response.
-     */
     WITH date_series AS (
-      SELECT generate_series(__from_timestamp, __to_timestamp, __one_period) AS period
+      SELECT hafbe_backend.generate_time_buckets(_ctx) AS period
     ),
-
-    /*
-     * Flat per-(period, op_type_id) rows from the appropriate pre-aggregate.
-     */
     op_stats AS MATERIALIZED (
       SELECT s.date AS period, s.op_type_id, s.op_count, s.last_block_num
-      FROM hafbe_backend.get_operation_type_stats(_granularity, __from_timestamp, __to_timestamp, _op_types) s
+      FROM hafbe_backend.get_operation_type_stats(_granularity, _ctx.from_timestamp, _ctx.to_timestamp, _op_types) s
     ),
-
-    /*
-     * Roll the flat per-op-type rows up into one row per period:
-     *   - operations: array of (op_type_id, op_count)
-     *   - total_operations: sum across the array
-     *   - last_block_num: max across the array
-     */
     period_ops AS (
       SELECT
         os.period,
@@ -220,24 +174,13 @@ BEGIN
       FROM op_stats os
       GROUP BY os.period
     ),
-
-    /*
-     * Transaction totals for the same periods. Granularity dispatch:
-     *   daily/monthly  -> read directly from transaction_stats_by_day/_by_month
-     *   yearly         -> aggregate from monthly
-     */
     trx_stats AS MATERIALIZED (
       SELECT
         ts.date::TIMESTAMP AS period,
         ts.trx_count::BIGINT AS trx_count,
         ts.last_block_num
-      FROM hafbe_backend.get_transaction_stats(_granularity, __from_timestamp, __to_timestamp) ts
+      FROM hafbe_backend.get_transaction_stats(_granularity, _ctx.from_timestamp, _ctx.to_timestamp) ts
     ),
-
-    /*
-     * Final assembly: LEFT JOIN keeps every period from the series, even
-     * if op-type rollup or trx rollup happens to be empty for it.
-     */
     assembled AS (
       SELECT
         ds.period,
@@ -249,11 +192,6 @@ BEGIN
       LEFT JOIN period_ops po ON po.period = ds.period
       LEFT JOIN trx_stats  ts ON ts.period = ds.period
     ),
-
-    /*
-     * Fill in last_block_num for periods where both rollups were empty,
-     * using a lateral lookup for the last block before period end.
-     */
     with_block AS (
       SELECT
         a.period,
@@ -263,16 +201,11 @@ BEGIN
         COALESCE(a.last_block_num, jl.last_block_num) AS last_block_num
       FROM assembled a
       LEFT JOIN LATERAL (
-        SELECT b.num AS last_block_num
-        FROM hive.blocks_view b
-        WHERE b.created_at <= a.period + __one_period
-        ORDER BY b.created_at DESC
-        LIMIT 1
+        SELECT hafbe_backend.find_nearest_block_before(a.period + _ctx.one_period) AS last_block_num
       ) jl ON a.last_block_num IS NULL
     )
-
     SELECT
-      LEAST(wb.period + __one_period, CURRENT_TIMESTAMP)::TIMESTAMP AS date,
+      hafbe_backend.adjust_to_period_end(wb.period, _ctx.one_period) AS date,
       wb.total_transactions,
       wb.total_operations,
       wb.operations,

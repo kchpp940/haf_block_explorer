@@ -136,9 +136,9 @@ SET jit = OFF
 AS
 $$
 DECLARE
+  _filter_account_id INT         := hafah_backend.get_account_id("voter-name", FALSE);
   _block_range hive.blocks_range := hive.convert_to_blocks_range("from-block","to-block");
   _head_block_num INT            := hafbe_backend.get_hafbe_head_block();
-  _filter_account_id INT         := hafah_backend.get_account_id("voter-name", FALSE);
   _ops_count INT;
   _total_pages INT;
 

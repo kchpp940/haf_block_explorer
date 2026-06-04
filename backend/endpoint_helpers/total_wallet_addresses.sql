@@ -38,18 +38,21 @@ DECLARE
   __baseline            INT;
   __hafbe_current_block INT := (SELECT current_block_num FROM hafd.contexts WHERE name = 'hafbe_app');
 BEGIN
+  _direction := COALESCE(_direction, 'desc');
   _granularity := COALESCE(_granularity, 'yearly');
-  _direction   := COALESCE(_direction, 'desc');
 
   SELECT from_block, to_block
   INTO __from, __to
   FROM hafbe_backend.blocksearch_range(_from_block, _to_block, __hafbe_current_block);
 
-  __granularity := CASE
-    WHEN _granularity = 'daily'   THEN 'day'
-    WHEN _granularity = 'monthly' THEN 'month'
-    WHEN _granularity = 'yearly'  THEN 'year'
-  END;
+  __granularity := (
+    CASE
+      WHEN _granularity = 'daily'   THEN 'day'
+      WHEN _granularity = 'monthly' THEN 'month'
+      WHEN _granularity = 'yearly'  THEN 'year'
+      ELSE NULL
+    END
+  );
 
   __from_timestamp := DATE_TRUNC(
     __granularity,
@@ -62,7 +65,6 @@ BEGIN
 
   __one_period := ('1 ' || __granularity)::INTERVAL;
 
-  -- Wallets created strictly before the requested window (absolute chain baseline).
   SELECT COALESCE(COUNT(*), 0)::INT
   INTO __baseline
   FROM hafbe_app.account_parameters
@@ -72,7 +74,6 @@ BEGIN
     WITH date_series AS (
       SELECT generate_series(__from_timestamp, __to_timestamp, __one_period) AS period
     ),
-
     counts AS MATERIALIZED (
       SELECT
         DATE_TRUNC(__granularity, ap.created) AS period,
@@ -82,7 +83,6 @@ BEGIN
                            AND __to_timestamp + __one_period - INTERVAL '1 second'
       GROUP BY DATE_TRUNC(__granularity, ap.created)
     ),
-
     filled AS (
       SELECT
         ds.period,
@@ -90,7 +90,6 @@ BEGIN
       FROM date_series ds
       LEFT JOIN counts c ON c.period = ds.period
     ),
-
     cumulative AS (
       SELECT
         f.period,
@@ -98,7 +97,6 @@ BEGIN
         __baseline + SUM(f.new_wallets) OVER (ORDER BY f.period) AS total_wallets
       FROM filled f
     )
-
     SELECT
       LEAST(c.period + __one_period, CURRENT_TIMESTAMP)::TIMESTAMP AS date,
       c.new_wallets::INT,
