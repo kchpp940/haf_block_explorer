@@ -102,16 +102,29 @@ SET join_collapse_limit = 16
 SET from_collapse_limit = 16
 AS
 $$
+DECLARE
+  _account_id INT := hafah_backend.get_account_id("account-name", TRUE);
 BEGIN
-    RETURN QUERY
-        SELECT *
-        FROM hafbe_backend.get_account_proxies_power_endpoint(
-            "account-name",
-            "page",
-            "sort",
-            "direction"
-        );
-END
+  -- validate that page ≥ 1
+  PERFORM hafbe_backend.validate_negative_page("page");
+
+  -- set short public cache
+  PERFORM set_config(
+    'response.headers',
+    '[{"Cache-Control":"public, max-age=5"}]',
+    true
+  );
+
+  -- delegate to ID-based backend logic
+  RETURN QUERY
+    SELECT *
+      FROM hafbe_backend.get_account_proxies_power(
+             _account_id,
+             "page",
+             "sort",
+             "direction"
+           );
+END;
 $$;
 
 RESET ROLE;

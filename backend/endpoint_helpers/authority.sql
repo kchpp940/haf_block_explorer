@@ -238,47 +238,4 @@ BEGIN
 END
 $$;
 
--- -----------------------------------------------------------------------------
--- Endpoint Helper Function
--- -----------------------------------------------------------------------------
-
-/*
- * get_account_authority_endpoint: Retrieves complete authority information for an account.
- *
- * Consolidated helper for the get_account_authority endpoint. Uses the
- * account_query_context for account validation, then retrieves all authority
- * types (owner, active, posting, memo, witness_signing) in a single call.
- *
- * PARAMETERS:
- *   _account_name - The account name to retrieve authority for
- *
- * RETURNS: hafbe_backend.account_authority with all authority fields
- *
- * NOTE: Cache control is handled by the context builder.
- */
-CREATE OR REPLACE FUNCTION hafbe_backend.get_account_authority_endpoint(
-    _account_name TEXT
-)
-RETURNS hafbe_backend.account_authority
-LANGUAGE 'plpgsql' STABLE
-SET JIT = OFF
-SET join_collapse_limit = 16
-SET from_collapse_limit = 16
-AS
-$$
-DECLARE
-    __ctx hafbe_backend.account_query_context;
-BEGIN
-    __ctx := hafbe_backend.account_context_build_simple(_account_name);
-
-    RETURN (
-        hafbe_backend.get_account_authority(__ctx.account_id, 'OWNER'),
-        hafbe_backend.get_account_authority(__ctx.account_id, 'ACTIVE'),
-        hafbe_backend.get_account_authority(__ctx.account_id, 'POSTING'),
-        hafbe_backend.get_account_memo(__ctx.account_id),
-        hafbe_backend.get_account_witness_signing(__ctx.account_id)
-    )::hafbe_backend.account_authority;
-END
-$$;
-
 RESET ROLE;
