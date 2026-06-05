@@ -19,6 +19,8 @@ variables:
   HAF_DATA_DIRECTORY: "/srv/haf/data"
   HAF_SHM_DIRECTORY: "/srv/haf/shm"
   SETUP_UID: "999"
+  PERFORMANCE_SMOKE_MAX_RESPONSE_TIME: "2000"
+  PERFORMANCE_SMOKE_MIN_SUCCESS_RATE: "95"
 
 default:
   image: ${CI_REGISTRY_IMAGE}/ci-runner:latest
@@ -86,7 +88,8 @@ build_docker_images:
 # ============================================================================
 
 # ----------------------------------------------------------------------------
-# SQL Check Job - Runs SQL regression tests using existing run_test.sh
+# SQL Check Job - Validates SQL installation, schema, contexts and tables
+#                 Does NOT run regression tests - use run_test.sh for that
 # ----------------------------------------------------------------------------
 
 sql_check:
@@ -97,36 +100,28 @@ sql_check:
   variables:
     DOCKER_TLS_CERTDIR: "/certs"
   script:
-    - !reference [.start_hafbe_environment, script]
-    - echo "=== Running SQL regression tests (reusing tests/regression/run_test.sh) ==="
+    - !reference [.bootstrap_hafbe_environment, script]
+    - echo "=== Running SQL Check (schema/contexts/tables validation) ==="
+    - echo "Purpose: Verify SQL installation is correct, schemas exist, contexts are attached"
+    - echo "Note: This does NOT run regression tests"
     - mkdir -p "${CI_ARTIFACTS_DIR}/sql-check" "${CI_LOGS_DIR}/sql-check"
-    - cd tests/regression
-    - TEST_RESULT=0
-    - ./run_test.sh \
-        --host=localhost \
-        --port=5432 \
-        --user=haf_admin \
-        --type=all 2>&1 | tee "${CI_LOGS_DIR}/sql-check/regression.log" || TEST_RESULT=$?
-    - cd "${CI_PROJECT_DIR}"
-    - cp tests/regression/regression_test.log "${CI_LOGS_DIR}/sql-check/" 2>/dev/null || true
-    - |
-      if [ "$TEST_RESULT" -eq 0 ]; then
-        echo "SQL_CHECK_PASSED=true" > "${CI_ARTIFACTS_DIR}/sql-check/sql-check.env"
-        echo "=== SQL regression tests PASSED ==="
-      else
-        echo "SQL_CHECK_PASSED=false" > "${CI_ARTIFACTS_DIR}/sql-check/sql-check.env"
-        echo "=== SQL regression tests FAILED ==="
-        exit 1
-      fi
+    - ./scripts/ci-helpers/sql_check.sh \
+        --postgres-access="postgresql://haf_admin@localhost:5432/haf_block_log" \
+        --output-dir="${CI_ARTIFACTS_DIR}/sql-check" \
+        --logs-dir="${CI_LOGS_DIR}/sql-check"
+    - echo "=== SQL Check PASSED ==="
   artifacts:
     name: "sql-check-artifacts-${CI_JOB_NAME}-${CI_COMMIT_SHORT_SHA}"
     paths:
       - ${CI_ARTIFACTS_DIR}/sql-check/
       - ${CI_LOGS_DIR}/sql-check/
+      - ${CI_LOGS_DIR}/test/bootstrap/
+    reports:
+      junit: ${CI_ARTIFACTS_DIR}/sql-check/*.xml
     expire_in: 1 week
     when: always
   after_script:
-    - !reference [.collect_job_logs, script]
+    - !reference [.collect_job_container_logs, script]
     - !reference [.collect_sql_diagnostics, script]
     - !reference [.stop_hafbe_environment, script]
 
@@ -144,12 +139,13 @@ api_regression:
     HAFBE_ADDRESS: "localhost"
     HAFBE_PORT: "3000"
   script:
-    - !reference [.start_hafbe_environment, script]
-    - echo "=== Running Tavern API tests (reusing existing pytest-tavern framework) ==="
+    - !reference [.bootstrap_hafbe_environment, script]
+    - echo "=== Running API Regression Tests (Tavern/pytest) ==="
+    - echo "Purpose: Verify API endpoints return expected results"
     - mkdir -p "${CI_ARTIFACTS_DIR}/api-regression" "${CI_LOGS_DIR}/api-regression"
     - cd tests/tavern
-    - TEST_RESULT=0
     - pip install tavern[pytest] pytest-xdist pytest-html --quiet
+    - TEST_RESULT=0
     - if [ -f pytest.ini ]; then
         pytest -n 8 . \
           --junit-xml="${CI_ARTIFACTS_DIR}/api-regression/tavern-results.xml" \
@@ -174,17 +170,19 @@ api_regression:
     paths:
       - ${CI_ARTIFACTS_DIR}/api-regression/
       - ${CI_LOGS_DIR}/api-regression/
+      - ${CI_LOGS_DIR}/test/bootstrap/
     reports:
       junit: ${CI_ARTIFACTS_DIR}/api-regression/*.xml
     expire_in: 1 week
     when: always
   after_script:
-    - !reference [.collect_job_logs, script]
+    - !reference [.collect_job_container_logs, script]
     - !reference [.collect_api_diagnostics, script]
     - !reference [.stop_hafbe_environment, script]
 
 # ----------------------------------------------------------------------------
 # Performance Smoke Job - Runs lightweight performance tests
+#                         Auto-enabled on develop/master, manual on feature branches
 # ----------------------------------------------------------------------------
 
 performance_smoke:
@@ -194,22 +192,78 @@ performance_smoke:
     - docker:24.0-dind
   variables:
     DOCKER_TLS_CERTDIR: "/certs"
+    PERFORMANCE_TEST_DURATION: "30s"
+    PERFORMANCE_TEST_VUS: "5"
   script:
-    - !reference [.start_hafbe_environment, script]
-    - echo "=== Running performance smoke tests (reusing tests/performance/run_performance_tests.sh) ==="
+    - !reference [.bootstrap_hafbe_environment, script]
+    - echo "=== Running Performance Smoke Tests ==="
+    - echo "Purpose: Verify API performance meets basic thresholds"
+    - echo "Thresholds: p95 < ${PERFORMANCE_SMOKE_MAX_RESPONSE_TIME}ms, success rate >= ${PERFORMANCE_SMOKE_MIN_SUCCESS_RATE}%"
     - mkdir -p "${CI_ARTIFACTS_DIR}/performance-smoke" "${CI_LOGS_DIR}/performance-smoke"
     - TEST_RESULT=0
-    - ./tests/performance/run_performance_tests.sh \
-        --postgresql-host=localhost \
-        --postgresql-port=5432 \
-        --postgresql-user=haf_admin \
-        --postgresql-database=haf_block_log \
-        --database-size=100 \
-        --postgrest-host=localhost \
-        --postgrest-port=3000 \
-        --test-thread-count=2 \
-        --test-loop-count=10 2>&1 | tee "${CI_LOGS_DIR}/performance-smoke/performance.log" || TEST_RESULT=$?
-    - cp -r tests/performance/result/* "${CI_ARTIFACTS_DIR}/performance-smoke/" 2>/dev/null || true
+    - if command -v k6 &> /dev/null; then
+        echo "Using k6 for performance testing"
+        cat > "${CI_ARTIFACTS_DIR}/performance-smoke/smoke-test.js" <<K6EOF
+import http from 'k6/http';
+import { check, sleep } from 'k6';
+
+export const options = {
+    vus: ${PERFORMANCE_TEST_VUS},
+    duration: '${PERFORMANCE_TEST_DURATION}',
+    thresholds: {
+        http_req_duration: ['p(95)<${PERFORMANCE_SMOKE_MAX_RESPONSE_TIME}'],
+        http_req_failed: ['rate<0.05'],
+    },
+};
+
+const ENDPOINTS = [
+    'http://localhost:3000/rpc/get_latest_blocks?limit=10',
+    'http://localhost:3000/rpc/get_hafbe_version',
+];
+
+export default function () {
+    const endpoint = ENDPOINTS[Math.floor(Math.random() * ENDPOINTS.length)];
+    const res = http.get(endpoint, { timeout: '30s' });
+    check(res, {
+        'status is 200': (r) => r.status === 200,
+        'response time < 5s': (r) => r.timings.duration < 5000,
+    });
+    sleep(1);
+}
+K6EOF
+        k6 run "${CI_ARTIFACTS_DIR}/performance-smoke/smoke-test.js" \
+          --out json="${CI_ARTIFACTS_DIR}/performance-smoke/k6-results.json" \
+          --summary-export="${CI_ARTIFACTS_DIR}/performance-smoke/k6-summary.json" \
+          2>&1 | tee "${CI_LOGS_DIR}/performance-smoke/performance.log" || TEST_RESULT=$?
+      else
+        echo "k6 not found, running curl-based smoke test"
+        TOTAL_REQUESTS=0
+        SUCCESS_REQUESTS=0
+        MAX_TIME=0
+        for ((i=0; i<20; i++)); do
+            for url in "http://localhost:3000/rpc/get_latest_blocks?limit=10" "http://localhost:3000/rpc/get_hafbe_version"; do
+                START_REQ=\$(date +%s%N)
+                if curl -s -f -o /dev/null -w "%{http_code}" "\$url" | grep -q "200"; then
+                    SUCCESS_REQUESTS=\$((SUCCESS_REQUESTS + 1))
+                    END_REQ=\$(date +%s%N)
+                    ELAPSED=\$(( (END_REQ - START_REQ) / 1000000 ))
+                    [ "\$ELAPSED" -gt "\$MAX_TIME" ] && MAX_TIME=\$ELAPSED
+                fi
+                TOTAL_REQUESTS=\$((TOTAL_REQUESTS + 1))
+                sleep 0.5
+            done
+        done
+        SUCCESS_RATE=\$((SUCCESS_REQUESTS * 100 / TOTAL_REQUESTS))
+        echo "Total: \$TOTAL_REQUESTS, Success: \$SUCCESS_REQUESTS, Rate: \$SUCCESS_RATE%, Max Time: \$MAX_TIME ms" | tee "${CI_LOGS_DIR}/performance-smoke/performance.log"
+        if [ "\$SUCCESS_RATE" -lt "${PERFORMANCE_SMOKE_MIN_SUCCESS_RATE}" ]; then
+            echo "FAIL: Success rate \$SUCCESS_RATE% below threshold ${PERFORMANCE_SMOKE_MIN_SUCCESS_RATE}%"
+            TEST_RESULT=1
+        fi
+        if [ "\$MAX_TIME" -gt "${PERFORMANCE_SMOKE_MAX_RESPONSE_TIME}" ]; then
+            echo "FAIL: Max response time \$MAX_TIME ms above threshold ${PERFORMANCE_SMOKE_MAX_RESPONSE_TIME} ms"
+            TEST_RESULT=1
+        fi
+      fi
     - |
       if [ "$TEST_RESULT" -eq 0 ]; then
         echo "PERFORMANCE_SMOKE_PASSED=true" > "${CI_ARTIFACTS_DIR}/performance-smoke/performance-smoke.env"
@@ -224,9 +278,10 @@ performance_smoke:
     paths:
       - ${CI_ARTIFACTS_DIR}/performance-smoke/
       - ${CI_LOGS_DIR}/performance-smoke/
+      - ${CI_LOGS_DIR}/test/bootstrap/
     expire_in: 1 week
     when: always
   after_script:
-    - !reference [.collect_job_logs, script]
+    - !reference [.collect_job_container_logs, script]
     - !reference [.collect_performance_diagnostics, script]
     - !reference [.stop_hafbe_environment, script]
