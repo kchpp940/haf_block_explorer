@@ -67,19 +67,27 @@ Just insert a row into `hafbe_app.processing_pipeline` and the dispatch function
 | `run_pipeline_live(_block)` | Runs ALL processors for a single block |
 | `run_pipeline_cache_seed()` | Seeds caches once at MASSIVE→LIVE transition |
 | `get_pipeline_vacuum_tables(_stage)` | Returns target tables for vacuum requests |
-| `validate_processing_pipeline(_mode)` | Validates pipeline configuration (auto-runs before dispatch) |
+| `get_pipeline_hash()` | Computes hash of pipeline table content (for change detection) |
+| `is_pipeline_valid(_mode)` | Lightweight runtime check (called automatically) |
+| `validate_processing_pipeline(_mode)` | Full validation (install time + manual) |
 
 ### Pipeline Validation:
 
-The pipeline is **automatically validated** before every execution to catch configuration errors early:
+**Two-layer validation** to balance safety and performance:
 
+| Layer | Cost | When It Runs | What It Checks |
+|-------|------|--------------|----------------|
+| **Full Validation** | High (scans pg_proc/pg_class, recursive deps) | Install time + manual invocation | All 6 checks below |
+| **Runtime Check** | Low (single-row lookup + hash) | Before every run_pipeline_*() call | Hash match + mode validated |
+
+**Full validation (manual invocation):**
 ```sql
 SELECT hafbe_app.validate_processing_pipeline();      -- Validate both modes
 SELECT hafbe_app.validate_processing_pipeline('MASSIVE');
 SELECT hafbe_app.validate_processing_pipeline('LIVE');
 ```
 
-**Checks performed:**
+**Full validation checks performed:**
 1. **processor_id uniqueness** - No duplicate processor IDs
 2. **execution_order uniqueness** - No duplicate execution orders within each mode
 3. **Prerequisite validity** - All dependencies exist, run in the same mode, and have earlier execution_order
@@ -87,11 +95,28 @@ SELECT hafbe_app.validate_processing_pipeline('LIVE');
 5. **Function existence** - All referenced functions exist with matching signatures
 6. **Target table validity** - All target_tables exist in hafbe_app schema (no schema prefix)
 
-**When validation runs:**
+**When full validation runs:**
 - **At install time**: `scripts/install_app.sh` calls `validate_processing_pipeline()` after installing all processors
-- **At runtime**: `run_pipeline_massive()`, `run_pipeline_live()`, and `run_pipeline_cache_seed()` all call validation before execution
+- **Manually**: Run `SELECT hafbe_app.validate_processing_pipeline();` after modifying the pipeline table
 
-**If validation fails**: Raises a detailed EXCEPTION listing all violations. No data is processed until all issues are fixed.
+**Runtime check (automatic):**
+Every dispatch function (`run_pipeline_massive`, `run_pipeline_live`, `run_pipeline_cache_seed`) first calls `is_pipeline_valid(_mode)` which:
+1. Computes a hash of the current `processing_pipeline` table content
+2. Checks if this hash matches the last successful validation in `pipeline_validation_state`
+3. Verifies the requested mode was validated in that run
+
+**If validation fails:**
+- **Runtime check fails**: Raises EXCEPTION with guidance to run `SELECT hafbe_app.validate_processing_pipeline();`
+- **Full validation fails**: Raises a detailed EXCEPTION listing all violations
+
+No data is processed until all issues are fixed.
+
+**Inspect validation state:**
+```sql
+-- See when the pipeline was last validated and for which modes
+SELECT pipeline_hash, validated_modes, validated_at
+FROM hafbe_app.pipeline_validation_state;
+```
 
 ### Processor File Contract:
 
@@ -330,7 +355,15 @@ ORDER BY execution_order;
 -- Check vacuum tables for a stage
 SELECT * FROM hafbe_app.get_pipeline_vacuum_tables('MASSIVE');
 
--- Validate pipeline configuration (runs all checks, raises exception on failure)
+-- See validation state (last validated hash and modes)
+SELECT pipeline_hash, validated_modes, validated_at
+FROM hafbe_app.pipeline_validation_state;
+
+-- Compute current pipeline hash (to compare with validation state)
+SELECT hafbe_app.get_pipeline_hash() AS current_hash;
+
+-- Full validation (runs all 6 checks, raises exception on failure)
+-- Run this after modifying the pipeline table or adding/removing processors
 SELECT hafbe_app.validate_processing_pipeline();
 
 -- Validate a specific mode only
