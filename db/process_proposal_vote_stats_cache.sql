@@ -18,6 +18,18 @@ SET ROLE hafbe_owner;
  * NOTE: Vote-history and current_proposal_votes maintenance lives in
  * process_proposals (unified row-by-row processor for all proposal ops).
  * Only the cache refresh remains in this file.
+ *
+ * ======================= PIPELINE CONTRACT =======================
+ * Processor ID    : proposal_vote_stats_cache
+ * Execution Order : 110 (last cache processor)
+ * Runs In         : LIVE only (NOT during MASSIVE)
+ * Prerequisites   : proposals            — reads current_proposal_votes
+ *                   witness_votes_cache — reads account_vest_stats_cache
+ * Target Tables   : hafbe_app.proposal_vote_stats_cache
+ * Idempotency     : FULLY — safe to call any time, any number of times
+ *                   (full DELETE + INSERT rebuilds everything from scratch)
+ * Downstream Users: (none — data used directly by API endpoints)
+ * =================================================================
  */
 CREATE OR REPLACE FUNCTION hafbe_app.process_proposal_vote_stats_cache()
 RETURNS VOID

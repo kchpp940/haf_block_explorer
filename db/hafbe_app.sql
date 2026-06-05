@@ -697,11 +697,16 @@ $$;
  * Main dispatch function for block processing.
  * Routes to either massive or single processing based on current HAF stage.
  *
+ * Vacuum table lists are read from hafbe_app.processing_pipeline.target_tables
+ * (see db/processing_pipeline.sql).  Cache seeding at MASSIVE→LIVE transition
+ * uses hafbe_app.run_pipeline_cache_seed() which iterates cache processors
+ * from the same table.  No need to edit this when adding a new processor.
+ *
  * Behavior by stage:
  * - MASSIVE_PROCESSING: Calls massive_processing() for batch sync,
- *   requests vacuum on witness/proxy tables
- * - LIVE: Creates indexes (once), calls single_processing(),
- *   requests vacuum on cache tables
+ *   requests vacuum on all state processor target tables
+ * - LIVE: Creates indexes (once), seeds caches, calls single_processing(),
+ *   requests vacuum on all LIVE processor target tables
  *
  * @param _context_name  HAF context name (typically 'hafbe_app')
  * @param _block_range   Range of blocks to process (first_block, last_block)
@@ -716,14 +721,17 @@ RETURNS VOID
 LANGUAGE 'plpgsql' VOLATILE
 AS
 $$
+DECLARE
+  __vacuum_table TEXT;
 BEGIN
   IF hive.get_current_stage_name(_context_name) = 'MASSIVE_PROCESSING' THEN
     CALL hafbe_app.massive_processing(_block_range.first_block, _block_range.last_block, _logs);
-    PERFORM hive.app_request_table_vacuum('hafbe_app', 'current_witness_votes', interval '30 minutes');
-    PERFORM hive.app_request_table_vacuum('hafbe_app', 'current_witnesses', interval '30 minutes');
-    PERFORM hive.app_request_table_vacuum('hafbe_app', 'current_account_proxies', interval '30 minutes');
-    PERFORM hive.app_request_table_vacuum('hafbe_app', 'current_proposal_votes', interval '30 minutes');
-    PERFORM hive.app_request_table_vacuum('hafbe_app', 'current_proposals', interval '30 minutes');
+
+    FOR __vacuum_table IN
+      SELECT hafbe_app.get_pipeline_vacuum_tables('MASSIVE')
+    LOOP
+      PERFORM hive.app_request_table_vacuum('hafbe_app', __vacuum_table, interval '30 minutes');
+    END LOOP;
 
     RETURN;
   END IF;
@@ -735,16 +743,16 @@ BEGIN
     -- instead of waiting for the first LIVE block. During MASSIVE, the
     -- cache refresh functions are never called, so the caches are empty
     -- at this point.
-    PERFORM hafbe_app.process_witness_votes_cache();
-    PERFORM hafbe_app.process_proposal_vote_stats_cache();
+    PERFORM hafbe_app.run_pipeline_cache_seed();
   END IF;
   CALL hafbe_app.single_processing(_block_range.first_block, _logs);
+
   -- cache tables needs to be vacuumed, due to change from `TRUNCATE TABLE` to `DELETE FROM` in block processing
-  PERFORM hive.app_request_table_vacuum('hafbe_app', 'account_vest_stats_cache',   interval '10 minutes');
-  PERFORM hive.app_request_table_vacuum('hafbe_app', 'witness_votes_cache',        interval '10 minutes');
-  PERFORM hive.app_request_table_vacuum('hafbe_app', 'witness_rank_cache',         interval '10 minutes');
-  PERFORM hive.app_request_table_vacuum('hafbe_app', 'witness_votes_change_cache', interval '10 minutes');
-  PERFORM hive.app_request_table_vacuum('hafbe_app', 'proposal_vote_stats_cache',  interval '10 minutes');
+  FOR __vacuum_table IN
+    SELECT hafbe_app.get_pipeline_vacuum_tables('LIVE')
+  LOOP
+    PERFORM hive.app_request_table_vacuum('hafbe_app', __vacuum_table, interval '10 minutes');
+  END LOOP;
 END
 $$;
 
@@ -754,12 +762,10 @@ $$;
  * Process a range of blocks during initial sync (MASSIVE_PROCESSING stage).
  * Optimized for throughput with synchronous_commit OFF.
  *
- * Processing order per range:
- * 1. Account stats (account_parameters updates)
- * 2. Block operations (per-block op counts + per-day/month op-type rollups in one pass)
- * 3. Transaction stats (daily/monthly aggregations)
- * 4. Witness stats (witness metadata updates)
- * 5. Witness votes (vote history and current state)
+ * The actual processor list and execution order are defined in
+ * db/processing_pipeline.sql (processing_pipeline table, run_in_massive=TRUE).
+ * This function delegates to hafbe_app.run_pipeline_massive() which reads
+ * from that table — no need to edit this when adding a new processor.
  *
  * @param _from  First block number to process
  * @param _to    Last block number to process
@@ -784,16 +790,7 @@ BEGIN
     __start_ts := clock_timestamp();
   END IF;
 
-  PERFORM hafbe_app.process_account_stats(_from, _to);
-  PERFORM hafbe_app.process_block_operations(_from, _to);
-  PERFORM hafbe_app.process_transaction_stats(_from, _to);
-  PERFORM hafbe_app.process_witness_stats(_from, _to);
-  PERFORM hafbe_app.process_witness_votes(_from, _to);
-  -- process_proposals is the unified row-by-row processor for ALL proposal
-  -- ops (create/update/remove/pay/vote + decline/expired cleanup). Its
-  -- internal order-of-ops design is what guarantees fresh-sync correctness;
-  -- see process_proposals.sql.
-  PERFORM hafbe_app.process_proposals(_from, _to);
+  CALL hafbe_app.run_pipeline_massive(_from, _to);
 
   IF _logs THEN
     __end_ts := clock_timestamp();
@@ -811,6 +808,11 @@ $$;
  *
  * Called for each new block after initial sync is complete.
  * Processes all operation types for the given block plus cache updates.
+ *
+ * The actual processor list and execution order are defined in
+ * db/processing_pipeline.sql (processing_pipeline table, run_in_live=TRUE).
+ * This function delegates to hafbe_app.run_pipeline_live() which reads
+ * from that table — no need to edit this when adding a new processor.
  *
  * @param _block  Block number to process
  * @param _logs   Enable progress logging
@@ -833,16 +835,7 @@ BEGIN
     __start_ts := clock_timestamp();
   END IF;
 
-  PERFORM hafbe_app.process_account_stats(_block, _block);
-  PERFORM hafbe_app.process_block_operations(_block, _block);
-  PERFORM hafbe_app.process_transaction_stats(_block, _block);
-  PERFORM hafbe_app.process_witness_stats(_block, _block);
-  PERFORM hafbe_app.process_witness_votes(_block, _block);
-  PERFORM hafbe_app.process_proposals(_block, _block);
-  PERFORM hafbe_app.process_witness_votes_cache();
-  -- Must run after process_witness_votes_cache so account_vest_stats_cache
-  -- is fresh for the same block before we join against it.
-  PERFORM hafbe_app.process_proposal_vote_stats_cache();
+  CALL hafbe_app.run_pipeline_live(_block);
 
   IF _logs THEN
     __end_ts := clock_timestamp();

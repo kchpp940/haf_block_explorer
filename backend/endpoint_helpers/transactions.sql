@@ -211,12 +211,63 @@ LANGUAGE 'plpgsql' STABLE
 AS
 $$
 DECLARE
-  _ctx hafbe_backend.period_context := hafbe_backend.resolve_period_context(_granularity, _from_block, _to_block);
+  __from                INT;
+  __to                  INT;
+  __from_timestamp      TIMESTAMP;
+  __to_timestamp        TIMESTAMP;
+  __granularity         TEXT;
+  __one_period          INTERVAL;
+  __hafbe_current_block INT := (SELECT current_block_num FROM hafd.contexts WHERE name = 'hafbe_app');
 BEGIN
+  -- Normalize block range
+  SELECT from_block, to_block
+  INTO __from, __to
+  FROM hafbe_backend.blocksearch_range(_from_block, _to_block, __hafbe_current_block);
+
+  -- Convert granularity enum to PostgreSQL interval keyword
+  __granularity := (
+    CASE
+      WHEN _granularity = 'daily'   THEN 'day'
+      WHEN _granularity = 'monthly' THEN 'month'
+      WHEN _granularity = 'yearly'  THEN 'year'
+      ELSE NULL
+    END
+  );
+
+  -- Convert blocks to timestamps (truncated to period boundary)
+  __from_timestamp := DATE_TRUNC(
+    __granularity,
+    (SELECT b.created_at FROM hive.blocks_view b WHERE b.num = __from)::TIMESTAMP
+  );
+  __to_timestamp := DATE_TRUNC(
+    __granularity,
+    (SELECT b.created_at FROM hive.blocks_view b WHERE b.num = __to)::TIMESTAMP
+  );
+
+  __one_period := ('1 ' || __granularity)::INTERVAL;
+
   RETURN QUERY (
+    /*
+     * =========================================================================
+     * CTE: date_series
+     * =========================================================================
+     * PURPOSE: Generate complete time series for the requested range.
+     *
+     * Ensures we return a row for every period, even if no transactions
+     * occurred during that time.
+     */
     WITH date_series AS (
-      SELECT hafbe_backend.generate_time_buckets(_ctx) AS date
+      SELECT generate_series(__from_timestamp, __to_timestamp, __one_period) AS date
     ),
+
+    /*
+     * =========================================================================
+     * CTE: get_daily_aggregation
+     * =========================================================================
+     * WHY MATERIALIZED: Expensive query to pre-computed stats tables.
+     *
+     * PURPOSE: Fetch actual transaction statistics for the time range.
+     */
     get_daily_aggregation AS MATERIALIZED (
       SELECT
         bh.date,
@@ -225,8 +276,18 @@ BEGIN
         bh.min_trx,
         bh.max_trx,
         bh.last_block_num
-      FROM hafbe_backend.get_transaction_stats(_granularity, _ctx.from_timestamp, _ctx.to_timestamp) bh
+      FROM hafbe_backend.get_transaction_stats(_granularity, __from_timestamp, __to_timestamp) bh
     ),
+
+    /*
+     * =========================================================================
+     * CTE: transaction_records
+     * =========================================================================
+     * PURPOSE: Left join date series with actual data.
+     *
+     * Gaps in data (periods with no transactions) will have NULL values
+     * which are replaced with 0/NULL as appropriate.
+     */
     transaction_records AS (
       SELECT
         ds.date,
@@ -234,10 +295,20 @@ BEGIN
         COALESCE(bh.count_blocks, 0) AS count_blocks,
         COALESCE(bh.min_trx, 0)      AS min_trx,
         COALESCE(bh.max_trx, 0)      AS max_trx,
-        bh.last_block_num            AS last_block_num
+        bh.last_block_num            AS last_block_num  -- NULL if no data
       FROM date_series ds
       LEFT JOIN get_daily_aggregation bh ON ds.date = bh.date
     ),
+
+    /*
+     * =========================================================================
+     * CTE: join_missing_block
+     * =========================================================================
+     * PURPOSE: Fill in missing last_block_num for periods without transactions.
+     *
+     * Uses LATERAL join to find the most recent block before the end of
+     * the period. This ensures every row has a valid block reference.
+     */
     join_missing_block AS (
       SELECT
         fb.date,
@@ -248,11 +319,21 @@ BEGIN
         COALESCE(fb.last_block_num, jl.last_block_num) AS last_block_num
       FROM transaction_records fb
       LEFT JOIN LATERAL (
-        SELECT hafbe_backend.find_nearest_block_before(fb.date + _ctx.one_period) AS last_block_num
+        SELECT b.num AS last_block_num
+        FROM hive.blocks_view b
+        WHERE b.created_at <= fb.date + __one_period
+        ORDER BY b.created_at DESC
+        LIMIT 1
       ) jl ON fb.last_block_num IS NULL
     )
+
+    /*
+     * Final projection:
+     * - Adjust date to end of period (capped at current time)
+     * - Calculate average from count (avoid division by zero)
+     */
     SELECT
-      hafbe_backend.adjust_to_period_end(fb.date, _ctx.one_period) AS adjusted_date,
+      LEAST(fb.date + __one_period, CURRENT_TIMESTAMP)::TIMESTAMP AS adjusted_date,
       fb.trx_count::INT,
       (CASE WHEN fb.count_blocks = 0 THEN 0 ELSE (fb.trx_count / fb.count_blocks) END)::INT AS avg_trx,
       fb.min_trx::INT,

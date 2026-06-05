@@ -50,6 +50,26 @@ SET ROLE hafbe_owner;
  *   invariant is safety-critical (a remove-then-vote sequence in the same
  *   batch must not insert a vote after the cascade), so we use an explicit
  *   FOR loop whose iteration order is guaranteed by SQL semantics.
+ *
+ * ======================= PIPELINE CONTRACT =======================
+ * Processor ID    : proposals
+ * Execution Order : 60 (last state processor)
+ * Runs In         : MASSIVE, LIVE
+ * Prerequisites   : account_stats  — reads can_vote for decline/expire ops
+ *                   witness_votes  — reads current_witness_votes for cascade
+ * Target Tables   : hafbe_app.proposal_votes_history
+ *                   hafbe_app.current_proposal_votes
+ *                   hafbe_app.current_proposals
+ *                   hafbe_app.proposal_payments
+ * Idempotency     : RANGE — safe to re-run same [_from,_to] range
+ *                   (create pairing uses ON CONFLICT DO NOTHING; row-by-row
+ *                    handlers produce correct final state on re-run; history
+ *                    table may get duplicate rows but ON CONFLICT is not
+ *                    applicable — re-running the same range is safe because
+ *                    handlers check current state before writing)
+ * Downstream Users: process_proposal_vote_stats_cache (reads
+ *                   current_proposal_votes and current_proposals)
+ * =================================================================
  */
 CREATE OR REPLACE FUNCTION hafbe_app.process_proposals(_from INT, _to INT)
 RETURNS VOID

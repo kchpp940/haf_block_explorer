@@ -36,7 +36,6 @@ ENDPOINTS_IN_ORDER="
 ../$endpoints/witnesses/get_witness_voters.sql
 ../$endpoints/witnesses/get_witness_voters_num.sql
 ../$endpoints/witnesses/get_witness_votes_history.sql
-../$endpoints/witnesses/get_witness_votes_timeline.sql
 ../$endpoints/accounts/get_account.sql
 ../$endpoints/accounts/get_account_authority.sql
 ../$endpoints/accounts/get_account_proxies_power.sql
@@ -47,7 +46,6 @@ ENDPOINTS_IN_ORDER="
 ../$endpoints/proposals/get_proposals.sql
 ../$endpoints/proposals/get_proposal_votes.sql
 ../$endpoints/proposals/get_proposal_votes_history.sql
-../$endpoints/proposals/get_proposal_vote_stats_history.sql
 ../$endpoints/transactions/get_transaction_statistics.sql
 ../$endpoints/transactions/get_operation_type_statistics.sql
 ../$endpoints/other/get_hafbe_version.sql

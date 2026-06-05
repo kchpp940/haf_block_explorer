@@ -14,6 +14,20 @@ SET ROLE hafbe_owner;
  * block_operations indexes exist) and keeps a single pass over operations_view.
  *
  * Daily/monthly stats use additive upsert so counts accumulate across MASSIVE batches.
+ *
+ * ======================= PIPELINE CONTRACT =======================
+ * Processor ID    : block_operations
+ * Execution Order : 20
+ * Runs In         : MASSIVE, LIVE
+ * Prerequisites   : (none)
+ * Target Tables   : hafbe_app.block_operations
+ *                   hafbe_app.operation_type_stats_by_day
+ *                   hafbe_app.operation_type_stats_by_month
+ * Idempotency     : RANGE — safe to re-run same [_from,_to] range
+ *                   (INSERT with ON CONFLICT handles block_operations;
+ *                    additive upsert accumulates correctly for stats)
+ * Downstream Users: (none — data used directly by API endpoints)
+ * =================================================================
  */
 CREATE OR REPLACE FUNCTION hafbe_app.process_block_operations(_from INT, _to INT)
 RETURNS VOID

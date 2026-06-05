@@ -141,6 +141,15 @@ setup_api() {
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/backend/operation_parsers/proposal_operations.sql"
 
   echo "Installing block processing functions..."
+  # NOTE: Install order below mirrors execution_order in processing_pipeline.sql.
+  # When adding a new state processor, insert its process_<name>.sql after
+  # process_block_operations.sql if it has no prerequisites, or after its
+  # prerequisites if it does. When adding a new cache processor, insert after
+  # process_proposal_vote_stats_cache.sql. See db/processing_pipeline.sql
+  # for the authoritative list of processors, their dependencies, and the
+  # dispatch functions (run_pipeline_massive / run_pipeline_live) that read
+  # this table at runtime.
+  psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/db/processing_pipeline.sql"
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/db/process_account_stats.sql"
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/db/process_block_operations.sql"
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/db/process_transaction_stats.sql"
@@ -148,6 +157,9 @@ setup_api() {
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/db/process_witness_votes.sql"
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/db/process_proposals.sql"
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/db/process_proposal_vote_stats_cache.sql"
+
+  echo "Validating processing pipeline configuration..."
+  psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -c "SELECT hafbe_app.validate_processing_pipeline();"
 
   echo "Installing OpenAPI types..."
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/types/enums.sql"
@@ -173,7 +185,6 @@ setup_api() {
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/backend/endpoint_helpers/blocks.sql"
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/backend/endpoint_helpers/account.sql"
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/backend/endpoint_helpers/proxies.sql"
-  psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/backend/endpoint_helpers/statistics_period.sql"
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/backend/endpoint_helpers/transactions.sql"
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/backend/endpoint_helpers/operation_type_stats.sql"
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/backend/endpoint_helpers/total_wallet_addresses.sql"
@@ -200,11 +211,9 @@ setup_api() {
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/witnesses/get_witness_voters_num.sql"
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/witnesses/get_witness_voters.sql"
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/witnesses/get_witness_votes_history.sql"
-  psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/witnesses/get_witness_votes_timeline.sql"
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/witnesses/get_witness.sql"
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/witnesses/get_witnesses.sql"
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/proposals/get_proposal_votes_history.sql"
-  psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/proposals/get_proposal_vote_stats_history.sql"
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/proposals/get_proposals.sql"
   psql "$POSTGRES_ACCESS" -v "ON_ERROR_STOP=on" -f "$HAFBE_DIR/endpoints/proposals/get_proposal_votes.sql"
 
