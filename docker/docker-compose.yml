@@ -1,4 +1,21 @@
 name: 'haf-be'
+
+x-healthcheck-defaults: &healthcheck-defaults
+  interval: 30s
+  timeout: 10s
+  retries: 3
+  start_period: 60s
+
+x-haf-healthcheck: &haf-healthcheck
+  <<: *healthcheck-defaults
+  start_period: 48h
+
+x-block-processing-healthcheck: &block-processing-healthcheck
+  <<: *healthcheck-defaults
+  interval: 60s
+  retries: 20
+  start_period: 72h
+
 services:
   haf:
     image: ${HAF_REGISTRY:-registry.gitlab.syncad.com/hive/haf/instance}:${HAF_VERSION:-9ec94375}
@@ -21,15 +38,13 @@ services:
       - haf_datadir:/home/hived/datadir
       - haf_shmdir:/home/hived/shm_dir
       - ./blockchain:/home/hived/datadir/blockchain
+      - ./scripts/common-healthcheck-lib.sh:/home/hived/common-healthcheck-lib.sh:ro
       - ./scripts/haf-healthcheck.sh:/home/hived/healthcheck.sh
     networks:
       haf-network:
     healthcheck:
+      <<: *haf-healthcheck
       test: ["CMD-SHELL","/home/hived/healthcheck.sh"]
-      interval: 60s
-      timeout: 10s
-      retries: 3
-      start_period: 48h #time for replay to finish
   hafah-install:
     image: ${HAFAH_REGISTRY:-registry.gitlab.syncad.com/hive/hafah}:${HAFAH_VERSION:-latest}
     command:
@@ -52,8 +67,6 @@ services:
     environment:
       POSTGRES_HOST: haf
       APP_SETUP_OPTIONS: --only-apps
-    # No volume mounts in base config - the Docker image contains all submodules
-    # For local dev with live submodule changes, use dev.yml which adds the mounts
     networks:
       haf-network:
     depends_on:
@@ -85,15 +98,13 @@ services:
       POSTGRES_USER: reptracker_owner
     volumes:
       - ../submodules/reptracker/scripts:/home/hived/haf_block_explorer/submodules/reptracker/scripts
+      - ./scripts/common-healthcheck-lib.sh:/home/hived/haf_block_explorer/common-healthcheck-lib.sh:ro
       - ./scripts/block-processing-healthcheck.sh:/home/hived/haf_block_explorer/block-processing-healthcheck.sh
     networks:
       haf-network:
     healthcheck:
+      <<: *block-processing-healthcheck
       test: ["CMD-SHELL","/home/hived/haf_block_explorer/block-processing-healthcheck.sh reptracker_app"]
-      interval: 60s
-      timeout: 5s
-      retries: 20
-      start_period: 72h #time for sync to finish
     depends_on:
       backend-setup:
         condition: service_completed_successfully
@@ -104,15 +115,13 @@ services:
       POSTGRES_HOST: haf
       POSTGRES_USER: hafbe_owner
     volumes:
+      - ./scripts/common-healthcheck-lib.sh:/home/hived/haf_block_explorer/common-healthcheck-lib.sh:ro
       - ./scripts/block-processing-healthcheck.sh:/home/hived/haf_block_explorer/block-processing-healthcheck.sh
     networks:
       haf-network:
     healthcheck:
-      test: ["CMD-SHELL","/home/hived/haf_block_explorer/block-processing-healthcheck.sh hafbe_app"]
-      interval: 60s
-      timeout: 5s
-      retries: 20
-      start_period: 72h #time for sync to finish
+      <<: *block-processing-healthcheck
+      test: ["CMD-SHELL","/home/hived/haf_block_explorer/block-processing-healthcheck.sh hafbe_app,hafbe_bal"]
     depends_on:
       backend-setup:
         condition: service_completed_successfully
@@ -146,7 +155,8 @@ services:
     environment:
       API_URL: http://localhost:3000/
     healthcheck:
-      test: ["CMD-SHELL","curl -f localhost:8080"]
+      <<: *healthcheck-defaults
+      test: ["CMD-SHELL","curl -f localhost:8080 || exit 1"]
     depends_on:
       backend-postgrest:
         condition: service_started
@@ -163,7 +173,8 @@ services:
     networks:
       haf-network:
     healthcheck:
-      test: ["CMD-SHELL","wget --no-verbose --tries=1 --spider --spider http://$PGHERO_USERNAME:$PGHERO_PASSWORD@localhost:8080/ || exit 1"]
+      <<: *healthcheck-defaults
+      test: ["CMD-SHELL","wget --no-verbose --tries=1 --spider http://$PGHERO_USERNAME:$PGHERO_PASSWORD@localhost:8080/ || exit 1"]
     depends_on:
       haf:
         condition: service_healthy
@@ -182,7 +193,8 @@ services:
     networks:
       haf-network:
     healthcheck:
-      test: ["CMD-SHELL","wget --no-verbose --tries=1 --spider --spider http://localhost/ || exit 1"]
+      <<: *healthcheck-defaults
+      test: ["CMD-SHELL","wget --no-verbose --tries=1 --spider http://localhost/ || exit 1"]
     depends_on:
       haf:
         condition: service_healthy

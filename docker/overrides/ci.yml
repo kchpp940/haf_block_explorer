@@ -1,127 +1,36 @@
-name: 'haf-be-ci'
-
 services:
   haf:
+    # Skip hived since cached data is already replayed (same as balance_tracker)
     command: ["--skip-hived"]
     environment:
       PGCTLTIMEOUT: 600
-      PG_ACCESS: |
-        host    all    all    all    trust
+      PG_ACCESS: "
+        host    all    all    all    trust\n
+        "
     ports:
-      - "5432:5432"
+      - 5432:5432
+    # Keep blockchain bind mount - provides dereferenced files from docker/blockchain
+    # (symlinks in datadir/blockchain point to /blockchain which isn't accessible in DinD)
     volumes:
       - haf_datadir:/home/hived/datadir
       - haf_shmdir:/home/hived/shm_dir
+      - ./scripts/common-healthcheck-lib.sh:/home/hived/common-healthcheck-lib.sh:ro
       - ./scripts/haf-healthcheck.sh:/home/hived/healthcheck.sh
       - ./blockchain:/home/hived/datadir/blockchain
-    healthcheck:
-      test: ["CMD-SHELL", "/home/hived/healthcheck.sh"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 300s
 
+  # CI-specific: hafah-install uses hafah Docker image (no submodule needed)
   hafah-install:
     image: ${HAFAH_REGISTRY:-registry.gitlab.syncad.com/hive/hafah}:${HAFAH_VERSION:-latest}
-    command:
-      - install_app
-    environment:
-      POSTGRES_URL: postgresql://haf_admin@haf:5432/haf_block_log
-    networks:
-      - haf-network
-    depends_on:
-      haf:
-        condition: service_healthy
 
+  # CI-specific volume mounts for app-setup
+  # Docker image doesn't contain submodules (GIT_SUBMODULE_STRATEGY: none in build)
+  # Mount submodules from host for install scripts
   app-setup:
-    image: ${BACKEND_REGISTRY:-registry.gitlab.syncad.com/hive/haf_block_explorer}:${BACKEND_VERSION:-latest}
-    working_dir: /home/hived/haf_block_explorer
-    entrypoint:
-      - "/bin/bash"
-      - "-c"
-      - "./scripts/install_app.sh ${APP_SETUP_OPTIONS}"
-    user: ${SETUP_UID:-999}
-    environment:
-      POSTGRES_HOST: haf
-      APP_SETUP_OPTIONS: --only-apps
     volumes:
       - ../submodules/btracker:/home/hived/haf_block_explorer/submodules/btracker
       - ../submodules/reptracker:/home/hived/haf_block_explorer/submodules/reptracker
+      # Mount .git for generate_version_sql.sh scripts
       - ../.git:/home/hived/haf_block_explorer/.git
-      - ../backend:/home/hived/haf_block_explorer/backend
-      - ../db:/home/hived/haf_block_explorer/db
-      - ../endpoints:/home/hived/haf_block_explorer/endpoints
-      - ../scripts:/home/hived/haf_block_explorer/scripts
-    networks:
-      - haf-network
-    depends_on:
-      haf:
-        condition: service_healthy
-      hafah-install:
-        condition: service_completed_successfully
-
-  backend-setup:
-    image: ${BACKEND_REGISTRY:-registry.gitlab.syncad.com/hive/haf_block_explorer}:${BACKEND_VERSION:-latest}
-    command:
-      - install_app
-      - --blocksearch-indexes=true
-    environment:
-      POSTGRES_HOST: haf
-    volumes:
-      - ../backend:/app/backend
-      - ../db:/app/db
-      - ../endpoints:/app/endpoints
-    networks:
-      - haf-network
-    depends_on:
-      app-setup:
-        condition: service_completed_successfully
-
-  backend-block-processing:
-    image: ${BACKEND_REGISTRY:-registry.gitlab.syncad.com/hive/haf_block_explorer}:${BACKEND_VERSION:-latest}
-    command: "process_blocks"
-    environment:
-      POSTGRES_HOST: haf
-      POSTGRES_USER: hafbe_owner
-    volumes:
-      - ./scripts/block-processing-healthcheck.sh:/app/block-processing-healthcheck.sh
-    networks:
-      - haf-network
-    healthcheck:
-      test: ["CMD-SHELL", "/app/block-processing-healthcheck.sh hafbe_app"]
-      interval: 30s
-      timeout: 5s
-      retries: 40
-      start_period: 300s
-    depends_on:
-      backend-setup:
-        condition: service_completed_successfully
-
-  backend-postgrest:
-    image: ${POSTGREST_REGISTRY:-postgrest/postgrest}:${POSTGREST_VERSION:-latest}
-    ports:
-      - "3000:3000"
-      - "3001:3001"
-    environment:
-      PGRST_ADMIN_SERVER_PORT: 3001
-      PGRST_DB_URI: postgresql://hafbe_owner@haf:5432/haf_block_log
-      PGRST_DB_SCHEMA: hafbe_endpoints
-      PGRST_DB_ANON_ROLE: hafbe_user
-      PGRST_DB_POOL: 20
-      PGRST_DB_POOL_ACQUISITION_TIMEOUT: 10
-      PGRST_OPENAPI_SERVER_PROXY_URI: http://localhost:3000
-      PGRST_DB_EXTRA_SEARCH_PATH: hafbe_bal, reptracker_app
-    networks:
-      - haf-network
-    depends_on:
-      haf:
-        condition: service_healthy
-      backend-block-processing:
-        condition: service_healthy
-
-networks:
-  haf-network:
-    name: haf-network
 
 volumes:
   haf_datadir:
@@ -129,10 +38,10 @@ volumes:
     driver_opts:
       o: bind
       type: none
-      device: ${HAF_DATA_DIRECTORY:-/srv/haf/data}/
+      device: ${HAF_DATA_DIRECTORY}/
   haf_shmdir:
     driver: local
     driver_opts:
       o: bind
       type: none
-      device: ${HAF_SHM_DIRECTORY:-/srv/haf/shm}/
+      device: ${HAF_SHM_DIRECTORY}/
