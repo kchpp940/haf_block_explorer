@@ -18,21 +18,17 @@
 
 name: 'haf-be-test'
 
-x-healthcheck-defaults: &healthcheck-defaults
-  interval: 10s
-  timeout: 10s
-  retries: 30
-  start_period: 60s
-
 services:
   haf:
     image: ${HAF_IMAGE_NAME:-registry.gitlab.syncad.com/hive/haf/instance:latest}
+    # No replay - just start PostgreSQL with existing data
     entrypoint: /home/hived/docker_entrypoint.sh
     command: ["--skip-hived"]
     environment:
       DATADIR: /home/hived/datadir
       SHM_DIR: /home/hived/shm_dir
       PGCTLTIMEOUT: 600
+      # Trust all connections in test environment
       PG_ACCESS: |
         host    all    haf_admin        all    trust
         host    all    haf_app_admin    all    trust
@@ -49,8 +45,11 @@ services:
     networks:
       - haf-network-test
     healthcheck:
-      <<: *healthcheck-defaults
-      test: ["CMD-SHELL","/home/hived/healthcheck.sh"]
+      test: ["CMD-SHELL", "psql -U haf_admin -d haf_block_log -c 'SELECT 1' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
     ports:
       - "5432:5432"
 
@@ -73,6 +72,8 @@ services:
     ports:
       - "3000:3000"
       - "3001:3001"
+    # Note: The postgrest image is minimal and has no curl/wget, so we can't use healthcheck.
+    # The wait-for-postgrest.sh script uses the HAF container to curl PostgREST instead.
 
 networks:
   haf-network-test:

@@ -8,11 +8,15 @@ x-healthcheck-defaults: &healthcheck-defaults
 
 x-haf-healthcheck: &haf-healthcheck
   <<: *healthcheck-defaults
+  interval: 60s
+  timeout: 10s
+  retries: 3
   start_period: 48h
 
 x-block-processing-healthcheck: &block-processing-healthcheck
   <<: *healthcheck-defaults
   interval: 60s
+  timeout: 5s
   retries: 20
   start_period: 72h
 
@@ -67,6 +71,8 @@ services:
     environment:
       POSTGRES_HOST: haf
       APP_SETUP_OPTIONS: --only-apps
+    # No volume mounts in base config - the Docker image contains all submodules
+    # For local dev with live submodule changes, use dev.yml which adds the mounts
     networks:
       haf-network:
     depends_on:
@@ -121,7 +127,7 @@ services:
       haf-network:
     healthcheck:
       <<: *block-processing-healthcheck
-      test: ["CMD-SHELL","/home/hived/haf_block_explorer/block-processing-healthcheck.sh hafbe_app,hafbe_bal"]
+      test: ["CMD-SHELL","/home/hived/haf_block_explorer/block-processing-healthcheck.sh hafbe_app"]
     depends_on:
       backend-setup:
         condition: service_completed_successfully
@@ -155,8 +161,7 @@ services:
     environment:
       API_URL: http://localhost:3000/
     healthcheck:
-      <<: *healthcheck-defaults
-      test: ["CMD-SHELL","curl -f localhost:8080 || exit 1"]
+      test: ["CMD-SHELL","curl -f localhost:8080"]
     depends_on:
       backend-postgrest:
         condition: service_started
@@ -173,8 +178,7 @@ services:
     networks:
       haf-network:
     healthcheck:
-      <<: *healthcheck-defaults
-      test: ["CMD-SHELL","wget --no-verbose --tries=1 --spider http://$PGHERO_USERNAME:$PGHERO_PASSWORD@localhost:8080/ || exit 1"]
+      test: ["CMD-SHELL","wget --no-verbose --tries=1 --spider --spider http://$PGHERO_USERNAME:$PGHERO_PASSWORD@localhost:8080/ || exit 1"]
     depends_on:
       haf:
         condition: service_healthy
@@ -193,8 +197,7 @@ services:
     networks:
       haf-network:
     healthcheck:
-      <<: *healthcheck-defaults
-      test: ["CMD-SHELL","wget --no-verbose --tries=1 --spider http://localhost/ || exit 1"]
+      test: ["CMD-SHELL","wget --no-verbose --tries=1 --spider --spider http://localhost/ || exit 1"]
     depends_on:
       haf:
         condition: service_healthy
