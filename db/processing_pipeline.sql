@@ -103,14 +103,22 @@ ON CONFLICT DO NOTHING;
 -- Trigger to bump current_pipeline_version on ANY change to processing_pipeline.
 -- This ensures we never miss a configuration change — runtime checks will see
 -- the version mismatch and prompt for re-validation.
+--
+-- Uses UPSERT to handle all edge cases:
+--   - First install (row doesn't exist yet)
+--   - Re-install (row may have been deleted / truncated)
+--   - TRUNCATE processing_pipeline then re-insert rows
 CREATE OR REPLACE FUNCTION hafbe_app._pipeline_config_changed()
 RETURNS TRIGGER
 LANGUAGE 'plpgsql'
 AS $$
 BEGIN
-    UPDATE hafbe_app.pipeline_validation_state
-    SET current_pipeline_version = current_pipeline_version + 1
-    WHERE state_id = 'current';
+    INSERT INTO hafbe_app.pipeline_validation_state
+        (state_id, current_pipeline_version, last_validated_version, validated_modes)
+    VALUES
+        ('current', 1, 0, '{}')
+    ON CONFLICT (state_id) DO UPDATE
+        SET current_pipeline_version = pipeline_validation_state.current_pipeline_version + 1;
     RETURN NULL;
 END $$;
 

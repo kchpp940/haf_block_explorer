@@ -124,6 +124,21 @@ SELECT current_pipeline_version, last_validated_version, validated_modes, valida
 FROM hafbe_app.pipeline_validation_state;
 ```
 
+**Regression Tests:**
+
+Run the validation pipeline test suite to ensure version tracking works correctly:
+```bash
+psql $POSTGRES_ACCESS -v ON_ERROR_STOP=on -f db/tests/test_processing_pipeline_validation.sql
+```
+
+The test verifies:
+1. Initial state rejects runtime checks
+2. Validation succeeds and updates state
+3. `INSERT` / `UPDATE` / `DELETE` / `TRUNCATE` on `processing_pipeline` all bump version
+4. Version mismatch fails runtime checks
+5. Re-validation restores runtime check pass
+6. Edge cases (row deleted, truncated, re-initialized) all handled correctly
+
 ### Processor File Contract:
 
 Every `db/process_*.sql` file has a `PIPELINE CONTRACT` block in its header that documents:
