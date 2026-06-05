@@ -74,25 +74,52 @@ CREATE TABLE IF NOT EXISTS hafbe_app.processing_pipeline (
 -- ============================================================================
 -- Tracks the last successful pipeline validation to avoid re-validating on every block.
 --
--- We compute a hash of the pipeline table content. If the hash matches what's stored
--- here AND the requested mode was validated, we skip full validation at runtime.
+-- pipeline_version is auto-incremented by trigger on ANY change to processing_pipeline.
+-- Runtime check compares this single value — no table scans, no hash computations.
 --
 -- Full validation (expensive, scans pg_proc/pg_class + recursive dependency checks)
 -- runs:
 --   - At install time (install_app.sh)
 --   - When manually called (SELECT hafbe_app.validate_processing_pipeline())
 --
--- Runtime check (cheap, single-row lookup + hash compute):
+-- Runtime check (ZERO extra table scans):
 --   - Runs before every run_pipeline_*() call
---   - Fails fast if pipeline changed without re-validation
+--   - Single-row comparison: last_validated_version == current_pipeline_version
 
 CREATE TABLE IF NOT EXISTS hafbe_app.pipeline_validation_state (
-    state_id            TEXT        NOT NULL  PRIMARY KEY DEFAULT 'current',
-    pipeline_hash       TEXT        NOT NULL,
-    validated_modes     TEXT[]      NOT NULL  DEFAULT '{}',
-    validated_at        TIMESTAMPTZ NOT NULL  DEFAULT NOW(),
+    state_id                TEXT        NOT NULL  PRIMARY KEY DEFAULT 'current',
+    current_pipeline_version INT        NOT NULL  DEFAULT 1,
+    last_validated_version   INT        NOT NULL  DEFAULT 0,
+    validated_modes         TEXT[]      NOT NULL  DEFAULT '{}',
+    validated_at            TIMESTAMPTZ NOT NULL  DEFAULT NOW(),
     CONSTRAINT state_id_check CHECK (state_id = 'current')
 );
+
+-- Initialize the single row if it doesn't exist yet
+INSERT INTO hafbe_app.pipeline_validation_state (state_id)
+VALUES ('current')
+ON CONFLICT DO NOTHING;
+
+-- Trigger to bump current_pipeline_version on ANY change to processing_pipeline.
+-- This ensures we never miss a configuration change — runtime checks will see
+-- the version mismatch and prompt for re-validation.
+CREATE OR REPLACE FUNCTION hafbe_app._pipeline_config_changed()
+RETURNS TRIGGER
+LANGUAGE 'plpgsql'
+AS $$
+BEGIN
+    UPDATE hafbe_app.pipeline_validation_state
+    SET current_pipeline_version = current_pipeline_version + 1
+    WHERE state_id = 'current';
+    RETURN NULL;
+END $$;
+
+DROP TRIGGER IF EXISTS _trigger_pipeline_changed ON hafbe_app.processing_pipeline;
+CREATE TRIGGER _trigger_pipeline_changed
+    AFTER INSERT OR UPDATE OR DELETE OR TRUNCATE
+    ON hafbe_app.processing_pipeline
+    FOR EACH STATEMENT
+    EXECUTE FUNCTION hafbe_app._pipeline_config_changed();
 
 -- ============================================================================
 -- STAGE 1: STATE PROCESSORS
@@ -391,38 +418,16 @@ $$;
 -- Runtime check (cheap, single-row lookup) runs before every run_pipeline_*() call.
 
 /*
- * get_pipeline_hash: Compute a hash of the current pipeline configuration.
- *
- * Used to detect if the pipeline table has changed since the last successful validation.
- * Returns a md5 hash of all rows in processing_pipeline, serialized in execution_order.
- */
-CREATE OR REPLACE FUNCTION hafbe_app.get_pipeline_hash()
-RETURNS TEXT
-LANGUAGE 'plpgsql'
-STABLE
-AS
-$$
-DECLARE
-    _hash TEXT;
-BEGIN
-    SELECT md5(string_agg(
-        row_to_json(p)::TEXT,
-        '|' ORDER BY execution_order
-    )) INTO _hash
-    FROM hafbe_app.processing_pipeline p;
-    RETURN COALESCE(_hash, 'empty');
-END
-$$;
-
-/*
  * is_pipeline_valid: Lightweight runtime check - is pipeline validated for this mode?
  *
  * Does NOT do full validation. Just checks:
- *   1. The pipeline table content hash matches the last successful validation
+ *   1. last_validated_version == current_pipeline_version (single integer comparison)
  *   2. The requested mode was validated in that last run
  *
- * Returns TRUE if valid, FALSE otherwise. Raises an EXCEPTION with user guidance
- * if validation is needed. Called before every run_pipeline_*() dispatch.
+ * ZERO table scans of processing_pipeline — version bumps via trigger.
+ *
+ * Raises an EXCEPTION with user guidance if validation is needed.
+ * Called before every run_pipeline_*() dispatch.
  */
 CREATE OR REPLACE FUNCTION hafbe_app.is_pipeline_valid(
     _mode TEXT
@@ -433,23 +438,20 @@ STABLE
 AS
 $$
 DECLARE
-    _current_hash TEXT;
     _state RECORD;
 BEGIN
-    _current_hash := hafbe_app.get_pipeline_hash();
-
     SELECT * INTO _state
     FROM hafbe_app.pipeline_validation_state
     WHERE state_id = 'current';
 
-    IF NOT FOUND THEN
+    IF _state.last_validated_version = 0 THEN
         RAISE EXCEPTION
             'Processing pipeline has not been validated.%'
             'Run: SELECT hafbe_app.validate_processing_pipeline();',
             chr(10);
     END IF;
 
-    IF _state.pipeline_hash != _current_hash THEN
+    IF _state.last_validated_version != _state.current_pipeline_version THEN
         RAISE EXCEPTION
             'Processing pipeline configuration has changed since last validation.%'
             'Run: SELECT hafbe_app.validate_processing_pipeline();',
@@ -503,7 +505,7 @@ DECLARE
     _violations TEXT[] := '{}';
     _visited TEXT[] := '{}';
     _path TEXT[] := '{}';
-    _current_hash TEXT;
+    _current_version INT;
     _state RECORD;
 
     FUNCTION add_violation(_msg TEXT) RETURNS VOID AS $$
@@ -734,25 +736,23 @@ BEGIN
     -- Validation passed. Update the state table so runtime checks know it's safe.
     -- If _mode is NULL, we validated both MASSIVE and LIVE (via recursive calls).
     IF _mode IS NOT NULL THEN
-        _current_hash := hafbe_app.get_pipeline_hash();
-
-        -- Check if we already have state for this hash
         SELECT * INTO _state
         FROM hafbe_app.pipeline_validation_state
         WHERE state_id = 'current';
 
-        IF NOT FOUND OR _state.pipeline_hash != _current_hash THEN
-            -- New or changed configuration - create fresh state
-            INSERT INTO hafbe_app.pipeline_validation_state
-                (state_id, pipeline_hash, validated_modes, validated_at)
-            VALUES
-                ('current', _current_hash, ARRAY[_mode], NOW())
-            ON CONFLICT (state_id) DO UPDATE
-                SET pipeline_hash = EXCLUDED.pipeline_hash,
-                    validated_modes = EXCLUDED.validated_modes,
-                    validated_at = EXCLUDED.validated_at;
+        _current_version := _state.current_pipeline_version;
+
+        -- If this is the first mode we're validating for this version,
+        -- reset validated_modes. Otherwise, just add to it.
+        IF _state.last_validated_version != _current_version THEN
+            -- New or changed configuration - fresh validation
+            UPDATE hafbe_app.pipeline_validation_state
+            SET last_validated_version = _current_version,
+                validated_modes = ARRAY[_mode],
+                validated_at = NOW()
+            WHERE state_id = 'current';
         ELSE
-            -- Same hash, just add the mode if not already there
+            -- Same version, just add the mode if not already there
             IF NOT (_mode = ANY(_state.validated_modes)) THEN
                 UPDATE hafbe_app.pipeline_validation_state
                 SET validated_modes = array_append(validated_modes, _mode),

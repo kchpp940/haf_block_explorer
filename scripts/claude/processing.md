@@ -67,9 +67,9 @@ Just insert a row into `hafbe_app.processing_pipeline` and the dispatch function
 | `run_pipeline_live(_block)` | Runs ALL processors for a single block |
 | `run_pipeline_cache_seed()` | Seeds caches once at MASSIVE→LIVE transition |
 | `get_pipeline_vacuum_tables(_stage)` | Returns target tables for vacuum requests |
-| `get_pipeline_hash()` | Computes hash of pipeline table content (for change detection) |
-| `is_pipeline_valid(_mode)` | Lightweight runtime check (called automatically) |
+| `is_pipeline_valid(_mode)` | **ZERO-cost** runtime check (single-row compare) |
 | `validate_processing_pipeline(_mode)` | Full validation (install time + manual) |
+| `_pipeline_config_changed()` | Internal trigger — auto-bumps version on config change |
 
 ### Pipeline Validation:
 
@@ -78,7 +78,13 @@ Just insert a row into `hafbe_app.processing_pipeline` and the dispatch function
 | Layer | Cost | When It Runs | What It Checks |
 |-------|------|--------------|----------------|
 | **Full Validation** | High (scans pg_proc/pg_class, recursive deps) | Install time + manual invocation | All 6 checks below |
-| **Runtime Check** | Low (single-row lookup + hash) | Before every run_pipeline_*() call | Hash match + mode validated |
+| **Runtime Check** | **ZERO** (single-row integer compare) | Before every run_pipeline_*() call | Version match + mode validated |
+
+**How version tracking works:**
+- `processing_pipeline` table has an `AFTER INSERT/UPDATE/DELETE/TRUNCATE` trigger
+- Any change automatically bumps `current_pipeline_version` in `pipeline_validation_state`
+- Runtime check compares `last_validated_version == current_pipeline_version`
+- No scans of `processing_pipeline`, no hash computations — just one integer compare
 
 **Full validation (manual invocation):**
 ```sql
@@ -101,9 +107,9 @@ SELECT hafbe_app.validate_processing_pipeline('LIVE');
 
 **Runtime check (automatic):**
 Every dispatch function (`run_pipeline_massive`, `run_pipeline_live`, `run_pipeline_cache_seed`) first calls `is_pipeline_valid(_mode)` which:
-1. Computes a hash of the current `processing_pipeline` table content
-2. Checks if this hash matches the last successful validation in `pipeline_validation_state`
-3. Verifies the requested mode was validated in that run
+1. Single-row read from `pipeline_validation_state`
+2. Integer compare: `last_validated_version == current_pipeline_version`
+3. Verify `_mode` is in `validated_modes`
 
 **If validation fails:**
 - **Runtime check fails**: Raises EXCEPTION with guidance to run `SELECT hafbe_app.validate_processing_pipeline();`
@@ -113,8 +119,8 @@ No data is processed until all issues are fixed.
 
 **Inspect validation state:**
 ```sql
--- See when the pipeline was last validated and for which modes
-SELECT pipeline_hash, validated_modes, validated_at
+-- See current version, last validated version, and validated modes
+SELECT current_pipeline_version, last_validated_version, validated_modes, validated_at
 FROM hafbe_app.pipeline_validation_state;
 ```
 
@@ -355,12 +361,9 @@ ORDER BY execution_order;
 -- Check vacuum tables for a stage
 SELECT * FROM hafbe_app.get_pipeline_vacuum_tables('MASSIVE');
 
--- See validation state (last validated hash and modes)
-SELECT pipeline_hash, validated_modes, validated_at
+-- See validation state (version tracking)
+SELECT current_pipeline_version, last_validated_version, validated_modes, validated_at
 FROM hafbe_app.pipeline_validation_state;
-
--- Compute current pipeline hash (to compare with validation state)
-SELECT hafbe_app.get_pipeline_hash() AS current_hash;
 
 -- Full validation (runs all 6 checks, raises exception on failure)
 -- Run this after modifying the pipeline table or adding/removing processors
