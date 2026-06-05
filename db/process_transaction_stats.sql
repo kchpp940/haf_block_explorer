@@ -6,19 +6,6 @@ SET ROLE hafbe_owner;
  * Core operations: Counts transactions per block, joins with block timestamps,
  * aggregates by day/month periods, and upserts into statistics tables.
  * Tracks sum, count, min, max for each time period.
- *
- * ======================= PIPELINE CONTRACT =======================
- * Processor ID    : transaction_stats
- * Execution Order : 30
- * Runs In         : MASSIVE, LIVE
- * Prerequisites   : (none)
- * Target Tables   : hafbe_app.transaction_stats_by_day
- *                   hafbe_app.transaction_stats_by_month
- * Idempotency     : RANGE — safe to re-run same [_from,_to] range
- *                   (additive upsert pattern: trx_count += EXCLUDED.trx_count;
- *                    LEAST/GREATEST handles min/max correctly on re-run)
- * Downstream Users: (none — data used directly by API endpoints)
- * =================================================================
  */
 CREATE OR REPLACE FUNCTION hafbe_app.process_transaction_stats(_from INT, _to INT)
 RETURNS VOID

@@ -6,17 +6,6 @@ SET ROLE hafbe_owner;
  * Core operations: Extracts account creation info (mined, recovery_account, created),
  * recovery events, voting rights changes, and account token claims. Updates the
  * hafbe_app.account_parameters table with latest values.
- *
- * ======================= PIPELINE CONTRACT =======================
- * Processor ID    : account_stats
- * Execution Order : 10 (first state processor)
- * Runs In         : MASSIVE, LIVE
- * Prerequisites   : (none — foundational state)
- * Target Tables   : hafbe_app.account_parameters
- * Idempotency     : RANGE — safe to re-run same [_from,_to] range
- *                   (UPSERT with field-specific COALESCE handles duplicates)
- * Downstream Users: process_proposals (reads can_vote flag for expired accounts)
- * =================================================================
  */
 CREATE OR REPLACE FUNCTION hafbe_app.process_account_stats(_from INT, _to INT)
 RETURNS VOID

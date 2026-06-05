@@ -12,26 +12,6 @@ SET ROLE hafbe_owner;
  *   - hafbe_app.account_proxies_history: Complete proxy change history
  *   - hafbe_app.current_account_proxies: Current proxy assignments
  *
- * ======================= PIPELINE CONTRACT =======================
- * Processor ID    : witness_votes
- * Execution Order : 50
- * Runs In         : MASSIVE, LIVE
- * Prerequisites   : (none for state processing; see witness_votes_cache
- *                   for cache refresh dependencies)
- * Target Tables   : hafbe_app.witness_votes_history
- *                   hafbe_app.current_witness_votes
- *                   hafbe_app.account_proxies_history
- *                   hafbe_app.current_account_proxies
- * Idempotency     : RANGE — safe to re-run same [_from,_to] range
- *                   (row-by-row processing re-applies operations in order;
- *                    history table is append-only, current tables use UPSERT
- *                    that produces correct final state)
- * Downstream Users: process_proposals (reads current_witness_votes for
- *                   expired_account cascades)
- *                   process_witness_votes_cache (reads current state to
- *                   build cache tables)
- * =================================================================
- *
  * WHY ROW-BY-ROW PROCESSING (not batch):
  *   Operations have complex interdependencies that require sequential processing:
  *
@@ -167,21 +147,6 @@ $$;
  *
  * NOTE: This uses DELETE + INSERT (full refresh) rather than incremental updates
  *   for simplicity and to avoid accumulating stale data.
- *
- * ======================= PIPELINE CONTRACT =======================
- * Processor ID    : witness_votes_cache
- * Execution Order : 100 (first cache processor)
- * Runs In         : LIVE only (NOT during MASSIVE)
- * Prerequisites   : witness_votes — must have current state populated
- * Target Tables   : hafbe_app.account_vest_stats_cache
- *                   hafbe_app.witness_votes_cache
- *                   hafbe_app.witness_rank_cache
- *                   hafbe_app.witness_votes_change_cache
- * Idempotency     : FULLY — safe to call any time, any number of times
- *                   (full DELETE + INSERT rebuilds everything from scratch)
- * Downstream Users: process_proposal_vote_stats_cache (reads
- *                   account_vest_stats_cache for stake weighting)
- * =================================================================
  */
 CREATE OR REPLACE FUNCTION hafbe_app.process_witness_votes_cache()
 RETURNS VOID

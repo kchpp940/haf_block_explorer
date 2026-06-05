@@ -10,18 +10,6 @@ SET ROLE hafbe_owner;
  * Properties tracked: url, price_feed, bias, feed_updated_at, block_size,
  * signing_key, version, hbd_interest_rate, account_creation_fee,
  * missed_blocks, last_created_block_num, created.
- *
- * ======================= PIPELINE CONTRACT =======================
- * Processor ID    : witness_stats
- * Execution Order : 40
- * Runs In         : MASSIVE, LIVE
- * Prerequisites   : (none)
- * Target Tables   : hafbe_app.current_witnesses
- * Idempotency     : RANGE — safe to re-run same [_from,_to] range
- *                   (UPSERT with field-specific COALESCE; additive pattern
- *                    for missed_blocks; MAX() for last_created_block_num)
- * Downstream Users: (none — data used directly by API endpoints)
- * =================================================================
  */
 CREATE OR REPLACE FUNCTION hafbe_app.process_witness_stats(_from INT, _to INT)
 RETURNS VOID
