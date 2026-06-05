@@ -1,39 +1,15 @@
 .collect_diagnostics_base:
   script:
-    - mkdir -p "${CI_DIAGNOSTICS_DIR}/${CI_JOB_STAGE}"
-    - echo "=== Collecting diagnostics for ${CI_JOB_STAGE} stage ===" > "${CI_DIAGNOSTICS_DIR}/${CI_JOB_STAGE}/diagnostics.log"
-    - echo "Job: ${CI_JOB_NAME}" >> "${CI_DIAGNOSTICS_DIR}/${CI_JOB_STAGE}/diagnostics.log"
-    - echo "Status: ${CI_JOB_STATUS}" >> "${CI_DIAGNOSTICS_DIR}/${CI_JOB_STAGE}/diagnostics.log"
-    - echo "Timestamp: $(date -Iseconds)" >> "${CI_DIAGNOSTICS_DIR}/${CI_JOB_STAGE}/diagnostics.log"
-
-.collect_docker_diagnostics:
-  script:
-    - |
-      if command -v docker &> /dev/null; then
-        echo "=== Docker Diagnostics ===" >> "${CI_DIAGNOSTICS_DIR}/${CI_JOB_STAGE}/diagnostics.log"
-        echo "--- Docker ps ---" >> "${CI_DIAGNOSTICS_DIR}/${CI_JOB_STAGE}/diagnostics.log"
-        docker ps -a >> "${CI_DIAGNOSTICS_DIR}/${CI_JOB_STAGE}/diagnostics.log" 2>&1 || true
-        echo "--- Docker images ---" >> "${CI_DIAGNOSTICS_DIR}/${CI_JOB_STAGE}/diagnostics.log"
-        docker images --digests >> "${CI_DIAGNOSTICS_DIR}/${CI_JOB_STAGE}/diagnostics.log" 2>&1 || true
-        echo "--- Docker system info ---" >> "${CI_DIAGNOSTICS_DIR}/${CI_JOB_STAGE}/diagnostics.log"
-        docker system info >> "${CI_DIAGNOSTICS_DIR}/${CI_JOB_STAGE}/diagnostics.log" 2>&1 || true
-        echo "--- Docker compose logs (if applicable) ---" >> "${CI_DIAGNOSTICS_DIR}/${CI_JOB_STAGE}/diagnostics.log"
-        if [ -f docker/docker-compose.yml ]; then
-          cd docker && docker compose logs --no-log-prefix --tail=500 >> "${CI_DIAGNOSTICS_DIR}/${CI_JOB_STAGE}/docker-compose.log" 2>&1 || true
-        fi
-      fi
+    - echo "=== Running diagnostics collection for ${CI_JOB_STAGE} stage ==="
+    - ./scripts/ci-helpers/collect_diagnostics.sh \
+        --stage="${CI_JOB_STAGE}" \
+        --output-dir="${CI_DIAGNOSTICS_DIR}/${CI_JOB_STAGE}" \
+        --postgres-access="postgresql://haf_admin@localhost:5432/haf_block_log" \
+        --postgrest-url="http://localhost:3000" 2>&1 || true
+    - echo "=== Diagnostics collection complete ==="
 
 .collect_build_diagnostics:
-  extends:
-    - .collect_diagnostics_base
-    - .collect_docker_diagnostics
-  script:
-    - !reference [.collect_diagnostics_base, script]
-    - !reference [.collect_docker_diagnostics, script]
-    - |
-      if [ -f docker/docker-bake.hcl ]; then
-        cp docker/docker-bake.hcl "${CI_DIAGNOSTICS_DIR}/build/" 2>/dev/null || true
-      fi
+  extends: .collect_diagnostics_base
   artifacts:
     paths:
       - ${CI_DIAGNOSTICS_DIR}/build/
@@ -41,26 +17,7 @@
     expire_in: 1 week
 
 .collect_bootstrap_diagnostics:
-  extends:
-    - .collect_diagnostics_base
-    - .collect_docker_diagnostics
-  script:
-    - !reference [.collect_diagnostics_base, script]
-    - !reference [.collect_docker_diagnostics, script]
-    - |
-      if command -v docker &> /dev/null && [ -f docker/docker-compose.yml ]; then
-        cd docker
-        for svc in $(docker compose ps -a --format '{{.Service}}' 2>/dev/null); do
-          docker compose logs --no-log-prefix "$svc" > "${CI_DIAGNOSTICS_DIR}/bootstrap/${svc}.log" 2>&1 || true
-        done
-      fi
-    - |
-      if command -v psql &> /dev/null; then
-        echo "=== PostgreSQL Diagnostics ===" >> "${CI_DIAGNOSTICS_DIR}/bootstrap/diagnostics.log"
-        psql "postgresql://haf_admin@localhost:5432/haf_block_log" -c "SELECT version();" >> "${CI_DIAGNOSTICS_DIR}/bootstrap/diagnostics.log" 2>&1 || true
-        psql "postgresql://haf_admin@localhost:5432/haf_block_log" -c "SELECT datname FROM pg_database;" >> "${CI_DIAGNOSTICS_DIR}/bootstrap/diagnostics.log" 2>&1 || true
-        psql "postgresql://haf_admin@localhost:5432/haf_block_log" -c "SELECT nspname FROM pg_namespace WHERE nspname LIKE 'haf%';" >> "${CI_DIAGNOSTICS_DIR}/bootstrap/diagnostics.log" 2>&1 || true
-      fi
+  extends: .collect_diagnostics_base
   artifacts:
     paths:
       - ${CI_DIAGNOSTICS_DIR}/bootstrap/
@@ -68,18 +25,7 @@
     expire_in: 1 week
 
 .collect_sql_diagnostics:
-  extends:
-    - .collect_diagnostics_base
-    - .collect_docker_diagnostics
-  script:
-    - !reference [.collect_diagnostics_base, script]
-    - !reference [.collect_docker_diagnostics, script]
-    - |
-      if command -v psql &> /dev/null; then
-        echo "=== SQL Diagnostics ===" >> "${CI_DIAGNOSTICS_DIR}/sql-check/diagnostics.log"
-        psql "postgresql://haf_admin@localhost:5432/haf_block_log" -c "SELECT name, current_block_num FROM hafd.contexts;" >> "${CI_DIAGNOSTICS_DIR}/sql-check/diagnostics.log" 2>&1 || true
-        psql "postgresql://haf_admin@localhost:5432/haf_block_log" -c "\\dt hafbe_app.*" >> "${CI_DIAGNOSTICS_DIR}/sql-check/diagnostics.log" 2>&1 || true
-      fi
+  extends: .collect_diagnostics_base
   artifacts:
     paths:
       - ${CI_DIAGNOSTICS_DIR}/sql-check/
@@ -87,17 +33,7 @@
     expire_in: 1 week
 
 .collect_api_diagnostics:
-  extends:
-    - .collect_diagnostics_base
-    - .collect_docker_diagnostics
-  script:
-    - !reference [.collect_diagnostics_base, script]
-    - !reference [.collect_docker_diagnostics, script]
-    - |
-      echo "=== API Diagnostics ===" >> "${CI_DIAGNOSTICS_DIR}/api-regression/diagnostics.log"
-      curl -s http://localhost:3000/ 2>&1 | head -50 >> "${CI_DIAGNOSTICS_DIR}/api-regression/diagnostics.log" || true
-      echo "" >> "${CI_DIAGNOSTICS_DIR}/api-regression/diagnostics.log"
-      curl -s http://localhost:3001/ready 2>&1 >> "${CI_DIAGNOSTICS_DIR}/api-regression/diagnostics.log" || true
+  extends: .collect_diagnostics_base
   artifacts:
     paths:
       - ${CI_DIAGNOSTICS_DIR}/api-regression/
@@ -105,17 +41,7 @@
     expire_in: 1 week
 
 .collect_performance_diagnostics:
-  extends:
-    - .collect_diagnostics_base
-    - .collect_docker_diagnostics
-  script:
-    - !reference [.collect_diagnostics_base, script]
-    - !reference [.collect_docker_diagnostics, script]
-    - |
-      if command -v psql &> /dev/null; then
-        echo "=== Performance Test Diagnostics ===" >> "${CI_DIAGNOSTICS_DIR}/performance-smoke/diagnostics.log"
-        psql "postgresql://haf_admin@localhost:5432/haf_block_log" -c "SELECT pid, query, now()-query_start as duration FROM pg_stat_activity WHERE state='active';" >> "${CI_DIAGNOSTICS_DIR}/performance-smoke/diagnostics.log" 2>&1 || true
-      fi
+  extends: .collect_diagnostics_base
   artifacts:
     paths:
       - ${CI_DIAGNOSTICS_DIR}/performance-smoke/
