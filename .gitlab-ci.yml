@@ -1,9 +1,6 @@
 stages:
   - build
-  - bootstrap
-  - sql-check
-  - api-regression
-  - performance-smoke
+  - test
 
 variables:
   CI_REGISTRY_IMAGE: "registry.gitlab.syncad.com/hive/haf_block_explorer"
@@ -36,6 +33,7 @@ default:
 
 include:
   - local: '/scripts/ci-helpers/skip_rules.yml'
+  - local: '/scripts/ci-helpers/environment.yml'
   - local: '/scripts/ci-helpers/diagnostics.yml'
 
 # ============================================================================
@@ -84,59 +82,23 @@ build_docker_images:
     - !reference [.collect_build_diagnostics, script]
 
 # ============================================================================
-# Bootstrap Stage - Start environment using existing start-ci-test-environment.sh
+# Test Stage - Each test job starts its own environment
 # ============================================================================
 
-bootstrap_environment:
-  stage: bootstrap
-  extends: .skip_test_on_docs_only_with_quick_test
-  services:
-    - docker:24.0-dind
-  variables:
-    DOCKER_TLS_CERTDIR: "/certs"
-  script:
-    - echo "=== Bootstrapping test environment (reusing start-ci-test-environment.sh) ==="
-    - source "${CI_ARTIFACTS_DIR}/build.env" 2>/dev/null || true
-    - BACKEND_VERSION="${BUILD_TAG:-${CI_COMMIT_SHORT_SHA}}"
-    - echo "Using backend version: ${BACKEND_VERSION}"
-    - mkdir -p "${CI_LOGS_DIR}/bootstrap"
-    - COMPOSE_OPTIONS_STRING="--env-file ci.env --file docker-compose.yml --file overrides/ci.yml" \
-        ./scripts/ci-helpers/start-ci-test-environment.sh \
-        --backend-version="${BACKEND_VERSION}" \
-        --haf-data-directory="${HAF_DATA_DIRECTORY}" \
-        --haf-shm-directory="${HAF_SHM_DIRECTORY}" \
-        --setup-uid="${SETUP_UID}" 2>&1 | tee "${CI_LOGS_DIR}/bootstrap/startup.log"
-    - echo "=== Waiting for HAF Block Explorer to be ready ==="
-    - ./scripts/ci-helpers/wait-for-haf-be-startup.sh \
-        --postgres-access="postgresql://haf_admin@localhost:5432/haf_block_log" 2>&1 | tee "${CI_LOGS_DIR}/bootstrap/wait-for-ready.log"
-    - echo "BOOTSTRAP_COMPLETE=true" > "${CI_ARTIFACTS_DIR}/bootstrap.env"
-    - echo "POSTGRES_ACCESS=postgresql://haf_admin@localhost:5432/haf_block_log" >> "${CI_ARTIFACTS_DIR}/bootstrap.env"
-    - echo "POSTGREST_URL=http://localhost:3000" >> "${CI_ARTIFACTS_DIR}/bootstrap.env"
-    - echo "=== Bootstrap complete ==="
-  artifacts:
-    name: "bootstrap-artifacts-${CI_JOB_NAME}-${CI_COMMIT_SHORT_SHA}"
-    paths:
-      - ${CI_ARTIFACTS_DIR}/
-      - ${CI_LOGS_DIR}/bootstrap/
-    expire_in: 1 week
-    when: always
-  after_script:
-    - !reference [.collect_bootstrap_diagnostics, script]
-
-# ============================================================================
-# SQL Check Stage - Run SQL regression tests using existing run_test.sh
-# ============================================================================
+# ----------------------------------------------------------------------------
+# SQL Check Job - Runs SQL regression tests using existing run_test.sh
+# ----------------------------------------------------------------------------
 
 sql_check:
-  stage: sql-check
+  stage: test
   extends: .skip_test_on_docs_only_with_quick_test
   services:
     - docker:24.0-dind
   variables:
     DOCKER_TLS_CERTDIR: "/certs"
   script:
+    - !reference [.start_hafbe_environment, script]
     - echo "=== Running SQL regression tests (reusing tests/regression/run_test.sh) ==="
-    - source "${CI_ARTIFACTS_DIR}/bootstrap.env" 2>/dev/null || true
     - mkdir -p "${CI_ARTIFACTS_DIR}/sql-check" "${CI_LOGS_DIR}/sql-check"
     - cd tests/regression
     - TEST_RESULT=0
@@ -164,14 +126,16 @@ sql_check:
     expire_in: 1 week
     when: always
   after_script:
+    - !reference [.collect_job_logs, script]
     - !reference [.collect_sql_diagnostics, script]
+    - !reference [.stop_hafbe_environment, script]
 
-# ============================================================================
-# API Regression Stage - Run Tavern API tests using existing test framework
-# ============================================================================
+# ----------------------------------------------------------------------------
+# API Regression Job - Runs Tavern API tests using existing test framework
+# ----------------------------------------------------------------------------
 
 api_regression:
-  stage: api-regression
+  stage: test
   extends: .skip_test_on_docs_only_with_quick_test
   services:
     - docker:24.0-dind
@@ -180,12 +144,12 @@ api_regression:
     HAFBE_ADDRESS: "localhost"
     HAFBE_PORT: "3000"
   script:
+    - !reference [.start_hafbe_environment, script]
     - echo "=== Running Tavern API tests (reusing existing pytest-tavern framework) ==="
-    - source "${CI_ARTIFACTS_DIR}/bootstrap.env" 2>/dev/null || true
     - mkdir -p "${CI_ARTIFACTS_DIR}/api-regression" "${CI_LOGS_DIR}/api-regression"
     - cd tests/tavern
     - TEST_RESULT=0
-    - pip install tavern[pytest] pytest-xdist --quiet
+    - pip install tavern[pytest] pytest-xdist pytest-html --quiet
     - if [ -f pytest.ini ]; then
         pytest -n 8 . \
           --junit-xml="${CI_ARTIFACTS_DIR}/api-regression/tavern-results.xml" \
@@ -215,22 +179,24 @@ api_regression:
     expire_in: 1 week
     when: always
   after_script:
+    - !reference [.collect_job_logs, script]
     - !reference [.collect_api_diagnostics, script]
+    - !reference [.stop_hafbe_environment, script]
 
-# ============================================================================
-# Performance Smoke Stage - Run lightweight performance tests using existing run_performance_tests.sh
-# ============================================================================
+# ----------------------------------------------------------------------------
+# Performance Smoke Job - Runs lightweight performance tests
+# ----------------------------------------------------------------------------
 
 performance_smoke:
-  stage: performance-smoke
+  stage: test
   extends: .manual_on_feature_branches
   services:
     - docker:24.0-dind
   variables:
     DOCKER_TLS_CERTDIR: "/certs"
   script:
+    - !reference [.start_hafbe_environment, script]
     - echo "=== Running performance smoke tests (reusing tests/performance/run_performance_tests.sh) ==="
-    - source "${CI_ARTIFACTS_DIR}/bootstrap.env" 2>/dev/null || true
     - mkdir -p "${CI_ARTIFACTS_DIR}/performance-smoke" "${CI_LOGS_DIR}/performance-smoke"
     - TEST_RESULT=0
     - ./tests/performance/run_performance_tests.sh \
@@ -261,4 +227,6 @@ performance_smoke:
     expire_in: 1 week
     when: always
   after_script:
+    - !reference [.collect_job_logs, script]
     - !reference [.collect_performance_diagnostics, script]
+    - !reference [.stop_hafbe_environment, script]

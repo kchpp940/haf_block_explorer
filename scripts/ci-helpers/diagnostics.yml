@@ -1,9 +1,9 @@
 .collect_diagnostics_base:
   script:
-    - echo "=== Running diagnostics collection for ${CI_JOB_STAGE} stage ==="
+    - echo "=== Running diagnostics collection for ${CI_JOB_NAME} ==="
     - ./scripts/ci-helpers/collect_diagnostics.sh \
         --stage="${CI_JOB_STAGE}" \
-        --output-dir="${CI_DIAGNOSTICS_DIR}/${CI_JOB_STAGE}" \
+        --output-dir="${CI_DIAGNOSTICS_DIR}/${CI_JOB_NAME}" \
         --postgres-access="postgresql://haf_admin@localhost:5432/haf_block_log" \
         --postgrest-url="http://localhost:3000" 2>&1 || true
     - echo "=== Diagnostics collection complete ==="
@@ -12,15 +12,7 @@
   extends: .collect_diagnostics_base
   artifacts:
     paths:
-      - ${CI_DIAGNOSTICS_DIR}/build/
-    when: on_failure
-    expire_in: 1 week
-
-.collect_bootstrap_diagnostics:
-  extends: .collect_diagnostics_base
-  artifacts:
-    paths:
-      - ${CI_DIAGNOSTICS_DIR}/bootstrap/
+      - ${CI_DIAGNOSTICS_DIR}/build_docker_images/
     when: on_failure
     expire_in: 1 week
 
@@ -28,7 +20,7 @@
   extends: .collect_diagnostics_base
   artifacts:
     paths:
-      - ${CI_DIAGNOSTICS_DIR}/sql-check/
+      - ${CI_DIAGNOSTICS_DIR}/sql_check/
     when: on_failure
     expire_in: 1 week
 
@@ -36,7 +28,7 @@
   extends: .collect_diagnostics_base
   artifacts:
     paths:
-      - ${CI_DIAGNOSTICS_DIR}/api-regression/
+      - ${CI_DIAGNOSTICS_DIR}/api_regression/
     when: on_failure
     expire_in: 1 week
 
@@ -44,6 +36,6 @@
   extends: .collect_diagnostics_base
   artifacts:
     paths:
-      - ${CI_DIAGNOSTICS_DIR}/performance-smoke/
+      - ${CI_DIAGNOSTICS_DIR}/performance_smoke/
     when: on_failure
     expire_in: 1 week
