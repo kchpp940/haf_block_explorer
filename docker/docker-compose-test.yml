@@ -24,12 +24,11 @@ x-healthcheck-defaults: &healthcheck-defaults
   retries: 3
   start_period: 60s
 
-x-haf-healthcheck: &haf-healthcheck
-  <<: *healthcheck-defaults
-  interval: 60s
-  timeout: 10s
-  retries: 3
-  start_period: 48h
+x-haf-db-healthcheck: &haf-db-healthcheck
+  interval: 10s
+  timeout: 5s
+  retries: 30
+  start_period: 60s
 
 services:
   haf:
@@ -54,11 +53,11 @@ services:
       - haf_datadir:/home/hived/datadir
       - haf_shmdir:/home/hived/shm_dir
       - ./scripts/common-healthcheck-lib.sh:/home/hived/common-healthcheck-lib.sh:ro
-      - ./scripts/haf-healthcheck.sh:/home/hived/healthcheck.sh
+      - ./scripts/haf-db-healthcheck.sh:/home/hived/healthcheck.sh
     networks:
       - haf-network-test
     healthcheck:
-      <<: *haf-healthcheck
+      <<: *haf-db-healthcheck
       test: ["CMD-SHELL","/home/hived/healthcheck.sh"]
     ports:
       - "5432:5432"
