@@ -44,11 +44,15 @@ done
 
 pushd "$script_dir"
 
-echo "Test 1. Reinstall app..."
+echo "Test 1. Verify Python API client is in sync with SQL endpoint definitions..."
+./check_api_client_sync.sh
+echo "API client sync check passed"
+
+echo "Test 2. Reinstall app..."
 ./install_app.sh --host="$POSTGRES_HOST"
 echo "Reinstall completed successfully"
 
-echo "Test 2. Uninstall app, leave indexes..."
+echo "Test 3. Uninstall app, leave indexes..."
 ./uninstall_app.sh --host="$POSTGRES_HOST"
 echo "Uninstall app completed successfully"
 

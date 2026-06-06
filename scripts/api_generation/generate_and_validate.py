@@ -140,15 +140,41 @@ def generate_client_to_dir(output_dir: Path, swagger_path: Path) -> None:
     )
 
 
-def run_generation_diff() -> DiffResult:
+def check_client_exists() -> tuple[bool, str]:
+    if not CLIENT_OUTPUT_DIR.exists():
+        return False, (
+            f"Generated client directory does not exist: {CLIENT_OUTPUT_DIR}\n"
+            f"The Python API client has not been generated. Run:\n"
+            f"  python {__file__} sync-client\n"
+            f"and commit the generated files."
+        )
+    py_files = list(CLIENT_OUTPUT_DIR.glob("*.py"))
+    if not py_files:
+        return False, (
+            f"Generated client directory {CLIENT_OUTPUT_DIR} exists but contains no .py files.\n"
+            f"Run: python {__file__} sync-client"
+        )
+    return True, f"Client directory present with {len(py_files)} .py module(s)"
+
+
+def run_generation_diff(require_client: bool = True) -> tuple[DiffResult | None, str]:
+    if require_client:
+        ok, msg = check_client_exists()
+        if not ok:
+            return None, msg
+
     swagger_path = FIXED_OPENAPI_JSON
     if not swagger_path.exists():
-        export_fixed_openapi(swagger_path)
+        return None, (
+            f"Fixed OpenAPI fixture missing: {FIXED_OPENAPI_JSON}\n"
+            f"Run: python {__file__} export-fixtures"
+        )
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp) / "hafbe_api_client"
         generate_client_to_dir(tmp_path, swagger_path)
-        return diff_directories(CLIENT_OUTPUT_DIR, tmp_path)
+        result = diff_directories(CLIENT_OUTPUT_DIR, tmp_path)
+        return result, format_diff_report(result)
 
 
 def format_diff_report(result: DiffResult) -> str:
@@ -177,11 +203,21 @@ def main() -> int:
 
     sub.add_parser("verify-fixtures", help="Verify endpoint_schema.sql matches the fixed OpenAPI fixture")
 
-    gen_diff = sub.add_parser("generate-diff", help="Regenerate client into temp dir and diff against checked-in")
-    gen_diff.add_argument("--fail-on-change", action="store_true", help="Exit non-zero if diff is non-empty")
+    check_client = sub.add_parser("check-client", help="Check that the generated client directory exists and is non-empty")
+
+    gen_diff = sub.add_parser(
+        "generate-diff",
+        help="Regenerate client into temp dir and diff against checked-in version. --fail-on-change fails on client missing, fixture drift, or content diff.",
+    )
+    gen_diff.add_argument("--fail-on-change", action="store_true", help="Exit non-zero if anything is out of sync (strict mode)")
 
     sync = sub.add_parser("sync-client", help="Regenerate client and write into the package directory")
     sync.add_argument("--force", action="store_true", help="Proceed even if fixtures mismatch")
+
+    check_all = sub.add_parser(
+        "check-all",
+        help="Run all sync checks in strict mode (fixtures + client exists + generation diff). Intended for CI.",
+    )
 
     args = parser.parse_args()
 
@@ -199,6 +235,11 @@ def main() -> int:
         print(msg_rules)
         return 0 if (ok_openapi and ok_rules) else 1
 
+    if args.command == "check-client":
+        ok, msg = check_client_exists()
+        print(msg)
+        return 0 if ok else 1
+
     if args.command == "generate-diff":
         ok_openapi, msg_openapi = verify_openapi_not_modified()
         ok_rules, msg_rules = verify_rewrite_rules_not_modified()
@@ -207,8 +248,13 @@ def main() -> int:
             print(msg_rules, file=sys.stderr)
             if args.fail_on_change:
                 return 2
-        result = run_generation_diff()
-        report = format_diff_report(result)
+        result, report = run_generation_diff(require_client=args.fail_on_change)
+        if result is None:
+            print(report, file=sys.stderr)
+            if args.fail_on_change:
+                return 4
+            print(report)
+            return 0
         print(report)
         if args.fail_on_change and result.has_changes:
             return 3
@@ -229,6 +275,43 @@ def main() -> int:
             shutil.rmtree(CLIENT_OUTPUT_DIR)
         generate_client_to_dir(CLIENT_OUTPUT_DIR, swagger_path)
         print(f"Client regenerated at {CLIENT_OUTPUT_DIR}")
+        return 0
+
+    if args.command == "check-all":
+        print("=== [1/4] Checking OpenAPI fixture ===")
+        ok_openapi, msg_openapi = verify_openapi_not_modified()
+        print(msg_openapi)
+        print()
+        print("=== [2/4] Checking rewrite rules fixture ===")
+        ok_rules, msg_rules = verify_rewrite_rules_not_modified()
+        print(msg_rules)
+        print()
+        if not (ok_openapi and ok_rules):
+            print()
+            print("STOPPED: Fixtures out of date. Re-run `export-fixtures` after updating SQL endpoints.", file=sys.stderr)
+            return 2
+
+        print("=== [3/4] Checking generated client exists ===")
+        ok_client, msg_client = check_client_exists()
+        print(msg_client)
+        print()
+        if not ok_client:
+            print("STOPPED: Client not generated. Run `sync-client` and commit the output.", file=sys.stderr)
+            return 4
+
+        print("=== [4/4] Generating fresh client and diffing against checked-in version ===")
+        result, report = run_generation_diff(require_client=True)
+        if result is None:
+            print(report, file=sys.stderr)
+            return 4
+        print(report)
+        if result.has_changes:
+            print(file=sys.stderr)
+            print("STOPPED: Generated client differs from checked-in version. Run `sync-client` and commit the changes.", file=sys.stderr)
+            return 3
+
+        print()
+        print("ALL CHECKS PASSED: endpoints schema, fixtures, and generated client are in sync.")
         return 0
 
     parser.print_help()

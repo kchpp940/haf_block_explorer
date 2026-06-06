@@ -4,10 +4,7 @@ import importlib
 import inspect
 import json
 import sys
-import typing
 from pathlib import Path
-
-import pytest
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent.parent
 API_GEN_DIR = SCRIPTS_DIR / "api_generation"
@@ -15,13 +12,11 @@ PROJECT_ROOT = SCRIPTS_DIR.parent
 sys.path.insert(0, str(API_GEN_DIR))
 
 from openapi_extractor import (  # noqa: E402
-    EndpointDef,
     load_openapi_spec,
 )
 from generate_and_validate import (  # noqa: E402
     FIXED_OPENAPI_JSON,
-    verify_openapi_not_modified,
-    verify_rewrite_rules_not_modified,
+    format_diff_report,
     run_generation_diff,
 )
 
@@ -69,25 +64,12 @@ OPERATION_ID_TO_PATHS = {
 }
 
 
-def skip_if_client_not_generated():
-    if not CLIENT_DIR.exists():
-        pytest.skip("Generated client package not present. Run the generation pipeline first.")
-
-
-def skip_if_fixtures_mismatch():
-    ok_openapi, _ = verify_openapi_not_modified()
-    ok_rules, _ = verify_rewrite_rules_not_modified()
-    if not (ok_openapi and ok_rules):
-        pytest.skip(
-            "Fixtures out of sync with endpoint_schema.sql. "
-            "Run `python scripts/api_generation/generate_and_validate.py export-fixtures`."
-        )
-
-
 def _load_generated_client_class():
     client_file = CLIENT_DIR / "hafbe_api_client.py"
-    if not client_file.exists():
-        return None
+    assert client_file.exists(), (
+        f"Generated client file not found: {client_file}. "
+        "Run `python scripts/api_generation/generate_and_validate.py sync-client`."
+    )
     spec = importlib.util.spec_from_file_location("hafbe_api_client_dynamic", client_file)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
@@ -96,14 +78,40 @@ def _load_generated_client_class():
         cls = getattr(module, attr)
         if isinstance(cls, type) and attr.endswith("Api"):
             return cls
-    return None
+    raise AssertionError(
+        "Could not locate generated API client class in hafbe_api_client.py. "
+        "The client generator may have changed its output convention."
+    )
+
+
+def test_client_package_directory_exists_and_has_modules():
+    assert CLIENT_DIR.exists(), (
+        f"Generated client directory missing: {CLIENT_DIR}. "
+        "Run `python scripts/api_generation/generate_and_validate.py sync-client` "
+        "and commit the generated files."
+    )
+    py_files = list(CLIENT_DIR.glob("*.py"))
+    assert len(py_files) > 0, (
+        "Client package directory exists but contains no .py modules. "
+        "Regenerate with `python scripts/api_generation/generate_and_validate.py sync-client`."
+    )
 
 
 def test_fixtures_are_in_sync_with_sql():
+    from generate_and_validate import verify_openapi_not_modified, verify_rewrite_rules_not_modified
     ok_openapi, msg_openapi = verify_openapi_not_modified()
     ok_rules, msg_rules = verify_rewrite_rules_not_modified()
-    assert ok_openapi, msg_openapi
-    assert ok_rules, msg_rules
+    assert ok_openapi, (
+        f"OpenAPI fixtures out of date with endpoint_schema.sql.\n"
+        f"{msg_openapi}\n"
+        "Run `python scripts/api_generation/generate_and_validate.py export-fixtures` "
+        "after modifying SQL endpoints."
+    )
+    assert ok_rules, (
+        f"Rewrite rules fixtures out of date.\n"
+        f"{msg_rules}\n"
+        "Run `python scripts/api_generation/generate_and_validate.py export-fixtures`."
+    )
 
 
 def test_fixed_openapi_spec_matches_expected_endpoints():
@@ -113,105 +121,102 @@ def test_fixed_openapi_spec_matches_expected_endpoints():
     assert paths == expected_paths, (
         f"OpenAPI paths mismatch.\n"
         f"Missing: {sorted(expected_paths - paths)}\n"
-        f"Extra:   {sorted(paths - expected_paths)}"
+        f"Extra:   {sorted(paths - expected_paths)}\n"
+        "Update OPERATION_ID_TO_PATHS mapping and re-export fixtures after adding/removing endpoints."
     )
 
 
-@pytest.mark.skipif(not CLIENT_DIR.exists(), reason="Generated client not present")
-def test_client_package_directory_exists():
-    assert CLIENT_DIR.exists()
-    init_files = list(CLIENT_DIR.glob("*.py"))
-    assert len(init_files) > 0, "Client package should contain Python modules"
-
-
-@pytest.mark.skipif(not CLIENT_DIR.exists(), reason="Generated client not present")
 def test_generated_client_matches_fixture_baseline():
-    skip_if_fixtures_mismatch()
-    result = run_generation_diff()
+    result, report = run_generation_diff(require_client=True)
+    assert result is not None, (
+        f"Could not perform generation diff:\n{report}"
+    )
     assert result.identical, (
         "Checked-in generated client differs from what the fixed OpenAPI fixture produces.\n"
-        + __import__("generate_and_validate", fromlist=["format_diff_report"]).format_diff_report(result)
-        + "\nRun `python scripts/api_generation/generate_and_validate.py sync-client` to regenerate."
+        f"{report}\n"
+        "Run `python scripts/api_generation/generate_and_validate.py sync-client` "
+        "and commit the regenerated client files."
     )
 
 
-@pytest.mark.skipif(not CLIENT_DIR.exists(), reason="Generated client not present")
 def test_every_endpoint_has_corresponding_client_method():
-    skip_if_client_not_generated()
-    skip_if_fixtures_mismatch()
     spec = load_openapi_spec(ENDPOINT_SCHEMA_SQL)
     client_cls = _load_generated_client_class()
-    assert client_cls is not None, "Could not locate generated API client class"
 
     methods = {name for name, _ in inspect.getmembers(client_cls, predicate=inspect.isfunction)}
     methods |= {name for name, _ in inspect.getmembers(client_cls, predicate=inspect.ismethod)}
 
+    missing: list[str] = []
     for ep in spec.endpoints:
         method_candidates = [
             operation_id_to_method_name(ep.operation_id),
             path_to_method_name(ep.path),
         ]
         found = any(c in methods for c in method_candidates)
-        assert found, (
-            f"Endpoint {ep.operation_id} (path={ep.path}) has no matching client method. "
-            f"Candidates checked: {method_candidates}. Available methods: {sorted(methods)}"
-        )
+        if not found:
+            missing.append(f"{ep.operation_id} (path={ep.path}, candidates={method_candidates})")
+
+    assert not missing, (
+        "The following endpoints have no corresponding method on the generated client:\n  - "
+        + "\n  - ".join(missing)
+        + "\n\nRegenerate the client with `python scripts/api_generation/generate_and_validate.py sync-client`."
+    )
 
 
-@pytest.mark.skipif(not CLIENT_DIR.exists(), reason="Generated client not present")
 def test_get_account_parameter_names_match():
-    skip_if_client_not_generated()
-    skip_if_fixtures_mismatch()
     spec = load_openapi_spec(ENDPOINT_SCHEMA_SQL)
     ep = spec.endpoint_by_operation_id("hafbe_endpoints.get_account")
     assert ep is not None
 
     client_cls = _load_generated_client_class()
-    assert client_cls is not None
     fn = getattr(client_cls, "get_account", None) or getattr(
         client_cls, "accounts_account_name", None
     )
-    assert fn is not None, "get_account method not found on generated client"
+    assert fn is not None, (
+        "get_account method not found on generated client. "
+        "Regenerate with `python scripts/api_generation/generate_and_validate.py sync-client`."
+    )
 
     sig = inspect.signature(fn)
     param_names = list(sig.parameters.keys())
     expected = [param_name_to_python(p.name) for p in ep.parameters]
     for e in expected:
         assert e in param_names, (
-            f"get_account missing expected parameter '{e}'. Actual params: {param_names}"
+            f"get_account missing expected parameter '{e}'. "
+            f"Actual params: {param_names}. "
+            "The generated client signature does not match the endpoint schema. "
+            "Re-run sync-client."
         )
 
 
-@pytest.mark.skipif(not CLIENT_DIR.exists(), reason="Generated client not present")
 def test_get_witness_voters_parameter_names_match():
-    skip_if_client_not_generated()
-    skip_if_fixtures_mismatch()
     spec = load_openapi_spec(ENDPOINT_SCHEMA_SQL)
     ep = spec.endpoint_by_operation_id("hafbe_endpoints.get_witness_voters")
     assert ep is not None
 
     client_cls = _load_generated_client_class()
-    assert client_cls is not None
     fn = None
     for candidate in ["get_witness_voters", "witnesses_account_name_voters"]:
         if hasattr(client_cls, candidate):
             fn = getattr(client_cls, candidate)
             break
-    assert fn is not None, "get_witness_voters method not found on generated client"
+    assert fn is not None, (
+        "get_witness_voters method not found on generated client. "
+        "Regenerate with `python scripts/api_generation/generate_and_validate.py sync-client`."
+    )
 
     sig = inspect.signature(fn)
     param_names = list(sig.parameters.keys())
     expected = [param_name_to_python(p.name) for p in ep.parameters]
     for e in expected:
         assert e in param_names, (
-            f"get_witness_voters missing expected parameter '{e}'. Actual params: {param_names}"
+            f"get_witness_voters missing expected parameter '{e}'. "
+            f"Actual params: {param_names}. "
+            "Regenerate the client — the endpoint schema parameters may have changed."
         )
 
 
-@pytest.mark.skipif(not CLIENT_DIR.exists(), reason="Generated client not present")
-def test_endpoints_with_error_responses_have_correct_mapping():
-    skip_if_client_not_generated()
-    skip_if_fixtures_mismatch()
+def test_endpoints_with_error_responses_have_correct_mapping_in_schema():
     spec = load_openapi_spec(ENDPOINT_SCHEMA_SQL)
 
     error_endpoints = [
@@ -223,23 +228,27 @@ def test_endpoints_with_error_responses_have_correct_mapping():
 
     for op_id, expected_errors in error_endpoints:
         ep = spec.endpoint_by_operation_id(op_id)
-        assert ep is not None
+        assert ep is not None, f"Endpoint {op_id} missing from schema"
         actual_errors = {
             r.status_code: r.description.strip()
             for r in ep.responses
             if r.status_code.startswith("4") or r.status_code.startswith("5")
         }
-        for code, desc in expected_errors.items():
-            assert code in actual_errors, f"{op_id} missing error response {code}"
+        for code, desc in expected_errors:
+            assert code in actual_errors, (
+                f"{op_id} missing error response code {code}. "
+                f"Defined error codes: {sorted(actual_errors.keys())}. "
+                "Check endpoints/endpoint_schema.sql and re-export fixtures if changed."
+            )
             assert desc in actual_errors[code], (
-                f"{op_id} error {code} description mismatch: expected '{desc}' got '{actual_errors[code]}'"
+                f"{op_id} error {code} description mismatch.\n"
+                f"Expected fragment: '{desc}'\n"
+                f"Got:                 '{actual_errors[code]}'\n"
+                "This usually means the endpoint SQL definition was changed without regenerating fixtures + client."
             )
 
 
-@pytest.mark.skipif(not CLIENT_DIR.exists(), reason="Generated client not present")
 def test_return_type_schemas_are_present_for_200_responses():
-    skip_if_client_not_generated()
-    skip_if_fixtures_mismatch()
     spec = load_openapi_spec(ENDPOINT_SCHEMA_SQL)
 
     schema_endpoints = [
@@ -255,16 +264,17 @@ def test_return_type_schemas_are_present_for_200_responses():
         ep = spec.endpoint_by_operation_id(op_id)
         assert ep is not None, f"Missing endpoint: {op_id}"
         resp_200 = next((r for r in ep.responses if r.status_code == "200"), None)
-        assert resp_200 is not None, f"{op_id} has no 200 response"
+        assert resp_200 is not None, f"{op_id} has no 200 response defined"
         assert resp_200.schema_ref == expected_ref, (
-            f"{op_id} 200 schema ref mismatch: expected {expected_ref}, got {resp_200.schema_ref}"
+            f"{op_id} 200 response schema ref mismatch.\n"
+            f"Expected: {expected_ref}\n"
+            f"Got:      {resp_200.schema_ref}\n"
+            "The endpoint return type was changed in SQL but the generated client was not refreshed. "
+            "Run export-fixtures + sync-client."
         )
 
 
-@pytest.mark.skipif(not CLIENT_DIR.exists(), reason="Generated client not present")
-def test_primitive_return_types_are_correct():
-    skip_if_client_not_generated()
-    skip_if_fixtures_mismatch()
+def test_primitive_return_types_are_correct_in_schema():
     spec = load_openapi_spec(ENDPOINT_SCHEMA_SQL)
 
     primitive_endpoints = [
@@ -275,12 +285,15 @@ def test_primitive_return_types_are_correct():
 
     for op_id, expected_type in primitive_endpoints:
         ep = spec.endpoint_by_operation_id(op_id)
-        assert ep is not None
+        assert ep is not None, f"Missing endpoint: {op_id}"
         resp_200 = next((r for r in ep.responses if r.status_code == "200"), None)
-        assert resp_200 is not None
+        assert resp_200 is not None, f"{op_id} has no 200 response"
         assert resp_200.schema_type == expected_type, (
-            f"{op_id} expected primitive return type '{expected_type}', got '{resp_200.schema_type}'"
+            f"{op_id} expected primitive return type '{expected_type}', "
+            f"got '{resp_200.schema_type}'. "
+            "The endpoint SQL schema changed — re-export fixtures and regenerate client."
         )
         assert resp_200.schema_ref is None, (
-            f"{op_id} should not have a schema $ref for primitive return"
+            f"{op_id} should return a primitive '{expected_type}' without a schema $ref, "
+            f"but got ref={resp_200.schema_ref}."
         )
