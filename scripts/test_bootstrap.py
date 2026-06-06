@@ -33,6 +33,7 @@ import argparse
 import gzip
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -40,6 +41,58 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+
+
+class _TeeWriter:
+    """Writes simultaneously to the original ``sys.stderr`` and a log file.
+
+    ANSI SGR escape sequences (colours, bold, reset) are stripped before
+    writing to the log file so that the on-disk log is human-readable in
+    plain-text viewers.  Flushes both streams after every write so that
+    diagnostic information written immediately before a crash still ends up
+    on disk.
+    """
+
+    def __init__(self, original_stream, log_file):
+        self._orig = original_stream
+        self._file = log_file
+
+    def write(self, data: str) -> int:
+        written = self._orig.write(data)
+        self._file.write(_ANSI_RE.sub("", data))
+        self._file.flush()
+        return written
+
+    def flush(self) -> None:
+        self._orig.flush()
+        self._file.flush()
+
+    def isatty(self) -> bool:
+        return self._orig.isatty()
+
+
+def _install_log_file(log_path: Optional[str]) -> Optional[_TeeWriter]:
+    """Open ``log_path`` and replace ``sys.stderr`` with a tee writer.
+
+    Returns the installed tee writer (so callers can restore the original
+    stream later) or ``None`` if no log file was requested.
+    """
+    if not log_path:
+        return None
+    try:
+        Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+        fh = open(log_path, "w", encoding="utf-8")
+    except OSError as exc:
+        sys.stderr.write(
+            f"ERROR: cannot open log file {log_path}: {exc}\n"
+        )
+        sys.exit(2)
+    tee = _TeeWriter(sys.stderr, fh)
+    sys.stderr = tee
+    return tee
+
 
 # psycopg2 is imported at module load but import failures are deferred until
 # the first database connection attempt, so ``--help`` and friend work even
@@ -180,6 +233,9 @@ def add_db_args(parser: argparse.ArgumentParser) -> None:
                         help="Full PostgreSQL URL (overrides --host/--port/--user/--database)")
     parser.add_argument("--skip-if-no-db", action="store_true",
                         help="Exit 0 cleanly if database is unreachable (for local dev / optional CI)")
+    parser.add_argument("--log-file", default=os.environ.get("TEST_BOOTSTRAP_LOG", ""),
+                        help="Append a copy of all diagnostic output to this file "
+                             "(ANSI colours stripped). Also accepts $TEST_BOOTSTRAP_LOG.")
 
 
 def _preflight_db(db: DBConfig, skip_if_no_db: bool = False,
@@ -1086,6 +1142,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[list[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    # Install the log-file tee BEFORE calling the handler so that every
+    # diagnostic write – including unhandled-exception messages – is captured
+    # on disk as well as printed to the terminal / CI log viewer.
+    _install_log_file(getattr(args, "log_file", "") or None)
 
     try:
         return args.handler(args)
