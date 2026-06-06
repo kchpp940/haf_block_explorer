@@ -736,6 +736,26 @@ The `--install-lint-tools` target installs (in a cross-platform way, macOS and L
 - `poetry` (pip, user-level)
 - Poetry environments for `scripts/api_generation/` and `scripts/python_api_package/`
 
+**CI integration** (how GitLab CI invokes the same checks):
+
+The CI lint stage is driven by `scripts/ci-helpers/run_lint.sh`, which is a thin wrapper
+around `./scripts/check_project.sh --ci`.  In CI mode the script emits machine-friendly
+output (no ANSI color, shellcheck → checkstyle XML, pytest → JUnit XML) so the results
+can be collected as job artifacts:
+
+```bash
+# Run all four lint gates the way CI does (generates XML artifacts in $CI_PROJECT_DIR)
+./scripts/ci-helpers/run_lint.sh
+
+# Run only a subset
+./scripts/ci-helpers/run_lint.sh shell sql
+```
+
+Artifacts written to the project root for CI collection:
+- `shellcheck-checkstyle.xml` — consumed by `scripts/ci-helpers/checkstyle2junit.xslt`
+- `openapi-tests.junit.xml` — JUnit report for OpenAPI rewrite validation
+- `python-package-tests.junit.xml` — JUnit report for Python package tests
+
 ### Development Workflow
 
 ```bash

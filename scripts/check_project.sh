@@ -17,6 +17,20 @@ SKIP_COUNT=0
 TOTAL_COUNT=0
 FAILED_CHECKS=""
 
+disable_colors() {
+    RED=''
+    GREEN=''
+    YELLOW=''
+    CYAN=''
+    NC=''
+}
+
+ci_echo() {
+    if [ "${CI_MODE}" = "true" ]; then
+        printf "%s\n" "$1"
+    fi
+}
+
 print_help() {
     cat <<'HELP_EOF'
 Usage: ./scripts/check_project.sh [OPTION]...
@@ -41,6 +55,9 @@ OPTIONS:
                          are not installed locally
   --install-deps         Run ./scripts/setup_dependencies.sh --install-lint-tools
                          to install all tools required by this script, then exit
+  --ci                   CI mode: machine-friendly output (no color,
+                         shellcheck=checkstyle, pytest=junit XML). The exact
+                         format upstream CI uses.
   --help, -h             Show this help message and exit
 HELP_EOF
 }
@@ -110,7 +127,14 @@ install_dependencies() {
 run_sqlfluff() {
     print_header "SQLFluff - SQL Code Style"
 
-    if ! command_exists sqlfluff; then
+    local sqlfluff_cmd=""
+    if command_exists sqlfluff; then
+        sqlfluff_cmd="sqlfluff"
+    elif command_exists python3 && python3 -m sqlfluff --version >/dev/null 2>&1; then
+        sqlfluff_cmd="python3 -m sqlfluff"
+    fi
+
+    if [ -z "${sqlfluff_cmd}" ]; then
         handle_missing_tool "sqlfluff" "pip install sqlfluff" || return 0
         return 0
     fi
@@ -133,7 +157,8 @@ run_sqlfluff() {
 
     (
         cd "${PROJECT_ROOT}"
-        sqlfluff ${fix_flag} ${verbose_flag} --config .sqlfluff
+        # shellcheck disable=SC2086
+        ${sqlfluff_cmd} ${fix_flag} ${verbose_flag} --config .sqlfluff
     ) > "${output_file}" 2>&1 || exit_code=$?
 
     if [ ${exit_code} -eq 0 ]; then
@@ -175,11 +200,14 @@ run_shellcheck() {
     fi
 
     local shellcheck_format="gcc"
-    if [ "${VERBOSE}" = "true" ]; then
+    if [ "${CI_MODE}" = "true" ]; then
+        shellcheck_format="checkstyle"
+    elif [ "${VERBOSE}" = "true" ]; then
         shellcheck_format="tty"
     fi
 
     local output_file="/tmp/check_project_shellcheck_$$.log"
+    local ci_artifact="${PROJECT_ROOT}/shellcheck-checkstyle.xml"
     local exit_code=0
 
     # shellcheck disable=SC2086
@@ -189,10 +217,20 @@ run_shellcheck() {
         --format="${shellcheck_format}" \
         > "${output_file}" 2>&1 || exit_code=$?
 
+    if [ "${CI_MODE}" = "true" ]; then
+        cp "${output_file}" "${ci_artifact}"
+    fi
+
     if [ ${exit_code} -eq 0 ]; then
         print_pass "ShellCheck passed for ${script_count} scripts"
+        if [ "${CI_MODE}" = "true" ]; then
+            printf "  CI artifact: shellcheck-checkstyle.xml (checkstyle format for scripts/ci-helpers/checkstyle2junit.xslt)\n"
+        fi
     else
         print_fail "ShellCheck found issues"
+        if [ "${CI_MODE}" = "true" ]; then
+            printf "  CI artifact saved to shellcheck-checkstyle.xml\n"
+        fi
         cat "${output_file}"
     fi
 
@@ -224,6 +262,9 @@ run_openapi_validation() {
     local pytest_args="-v"
     if [ "${VERBOSE}" != "true" ]; then
         pytest_args="-q"
+    fi
+    if [ "${CI_MODE}" = "true" ]; then
+        pytest_args="${pytest_args} --junitxml=${PROJECT_ROOT}/openapi-tests.junit.xml"
     fi
 
     local output_file="/tmp/check_project_openapi_$$.log"
@@ -274,6 +315,9 @@ run_python_tests() {
     local pytest_args="-v"
     if [ "${VERBOSE}" != "true" ]; then
         pytest_args="-q"
+    fi
+    if [ "${CI_MODE}" = "true" ]; then
+        pytest_args="${pytest_args} --junitxml=${PROJECT_ROOT}/python-package-tests.junit.xml"
     fi
 
     local output_file="/tmp/check_project_python_$$.log"
@@ -350,6 +394,7 @@ RUN_ALL=true
 FIX_MODE=false
 VERBOSE=false
 ALLOW_MISSING_TOOLS=false
+CI_MODE=false
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -384,6 +429,9 @@ while [ $# -gt 0 ]; do
         --install-deps)
             install_dependencies
             ;;
+        --ci)
+            CI_MODE=true
+            ;;
         --help|-h|-\?)
             print_help
             exit 0
@@ -404,12 +452,19 @@ while [ $# -gt 0 ]; do
     shift
 done
 
+if [ "${CI_MODE}" = "true" ]; then
+    disable_colors
+fi
+
 printf "${CYAN}HAF Block Explorer - Project Quality Checks${NC}\n"
 printf "Project root: %s\n" "${PROJECT_ROOT}"
 if [ "${ALLOW_MISSING_TOOLS}" = "true" ]; then
     printf "Mode:         %s\n" "permissive (missing tools skip)"
 else
     printf "Mode:         %s\n" "strict (missing tools fail — same as CI)"
+fi
+if [ "${CI_MODE}" = "true" ]; then
+    printf "Output:       machine-friendly (CI mode)\n"
 fi
 printf "\n"
 

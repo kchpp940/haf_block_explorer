@@ -146,6 +146,20 @@ This installs (cross-platform: macOS brew / Linux apt + pip):
 - `poetry`
 - Poetry environments for `scripts/api_generation/` and `scripts/python_api_package/` (includes pytest and all test deps)
 
+**CI mode / wrapper** (for GitLab CI integration):
+```bash
+# Machine-friendly output: no ANSI color, shellcheck=checkstyle XML, pytest=JUnit XML
+./scripts/check_project.sh --ci --all
+
+# Or via the dedicated CI wrapper (same behavior, accepts check names):
+./scripts/ci-helpers/run_lint.sh             # all four checks
+./scripts/ci-helpers/run_lint.sh shell sql   # subset
+```
+Artifacts written to the project root for GitLab CI collection:
+- `shellcheck-checkstyle.xml` — consumed by `scripts/ci-helpers/checkstyle2junit.xslt`
+- `openapi-tests.junit.xml` — OpenAPI pytest JUnit
+- `python-package-tests.junit.xml` — Python package pytest JUnit
+
 ---
 
 ### Mock Data Installer + Verifier

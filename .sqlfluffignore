@@ -3,3 +3,4 @@ __pycache__/
 submodules/
 docker/
 tests/mocks/sql/types.sql
+tests/mocks/sql/verify.sql

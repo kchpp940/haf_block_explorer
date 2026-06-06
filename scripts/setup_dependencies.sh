@@ -97,7 +97,7 @@ install_lint_tools() {
 
   echo "[lint-tools] Detected OS: $os"
 
-  # shellcheck
+  # Install the shell linting tool
   echo "[lint-tools] Installing shellcheck..."
   if [ "$os" = "macos" ]; then
     if ! command -v shellcheck >/dev/null 2>&1; then
