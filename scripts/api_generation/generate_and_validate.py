@@ -28,17 +28,14 @@ FIXED_OPENAPI_JSON = SCRIPTS_DIR / "fixtures" / "openapi_spec.json"
 FIXED_REWRITE_CONF = SCRIPTS_DIR / "fixtures" / "rewrite_rules.conf"
 
 _TIMESTAMP_RE = re.compile(r"^#   timestamp: .*$", re.MULTILINE)
-_GENERATED_IMPORT_RE = re.compile(
-    r"from (?:[a-zA-Z0-9_]+\.)?hafbe_api_client\.(\w+)(.*)"
+_TEMP_DIR_PREFIX_RE = re.compile(
+    r"from [A-Za-z0-9_]{6,}\.hafbe_api_client\."
 )
 
 
 def _normalize_content(content: str) -> str:
     content = _TIMESTAMP_RE.sub("#   timestamp: <normalized>", content)
-    content = _GENERATED_IMPORT_RE.sub(
-        lambda m: f"from <pkg>.hafbe_api_client.<mod>{m.group(2)}",
-        content,
-    )
+    content = _TEMP_DIR_PREFIX_RE.sub("from hiveio_hafbe_api.hafbe_api_client.", content)
     return content
 
 
@@ -214,7 +211,10 @@ def run_generation_diff(require_client: bool = True) -> tuple[DiffResult | None,
         )
 
     with tempfile.TemporaryDirectory() as tmp:
-        tmp_path = Path(tmp) / "hafbe_api_client"
+        tmp_root = Path(tmp) / "hiveio_hafbe_api"
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        (tmp_root / "__init__.py").write_text("", encoding="utf-8")
+        tmp_path = tmp_root / "hafbe_api_client"
         generate_client_to_dir(tmp_path, swagger_path)
         result = diff_directories(CLIENT_OUTPUT_DIR, tmp_path)
         return result, format_diff_report(result)
