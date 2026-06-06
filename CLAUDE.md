@@ -17,6 +17,7 @@ Blockchain API for querying Hive transactions, operations, accounts, and witness
 | API endpoints | `scripts/claude/endpoints.md` |
 | Tests | `scripts/claude/tests.md` |
 | Debugging/CI failures | `scripts/claude/tools.md` |
+| Pre-submit quality checks (local CI gate) | `scripts/check_project.sh --help` + `scripts/claude/tools.md` |
 
 ## External Dependencies
 

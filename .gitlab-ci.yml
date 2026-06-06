@@ -541,21 +541,13 @@ sync_with_mock_data:
     "${CI_PROJECT_DIR}/scripts/ci-helpers/start-ci-test-environment.sh"
     echo -e "\e[0Ksection_end:$(date +%s):compose\r\e[0K"
 
-    echo -e "\e[0Ksection_start:$(date +%s):mock_full[collapsed=true]\r\e[0KRunning test_bootstrap.py mock-full (install → process → indexes → verify)..."
-    pushd docker
-    IFS=" " read -ra COMPOSE_OPTIONS <<< "$COMPOSE_OPTIONS_STRING"
-    FILL_EXIT=$(docker compose "${COMPOSE_OPTIONS[@]}" wait fill-db-with-mock-data 2>/dev/null || docker inspect --format='{{.State.ExitCode}}' "$(docker compose "${COMPOSE_OPTIONS[@]}" ps -q fill-db-with-mock-data 2>/dev/null)" 2>/dev/null || echo "unknown")
-    if [[ "$FILL_EXIT" != "0" ]]; then
-      echo "ERROR: mock-full pipeline exited with code $FILL_EXIT"
-      echo "=== mock-full (fill-db-with-mock-data) full log ==="
-      docker compose "${COMPOSE_OPTIONS[@]}" logs --no-log-prefix fill-db-with-mock-data 2>&1 || true
-      echo "=== end mock-full log ==="
-      popd
-      exit 1
-    fi
-    echo "mock-full pipeline completed successfully (exit 0)"
-    popd
-    echo -e "\e[0Ksection_end:$(date +%s):mock_full\r\e[0K"
+    echo -e "\e[0Ksection_start:$(date +%s):wait[collapsed=true]\r\e[0KWaiting for mock data processing..."
+    "${CI_PROJECT_DIR}/scripts/ci-helpers/wait-for-haf-be-startup.sh" --postgres-access="${POSTGRES_ACCESS}"
+    echo -e "\e[0Ksection_end:$(date +%s):wait\r\e[0K"
+
+    echo -e "\e[0Ksection_start:$(date +%s):verify[collapsed=true]\r\e[0KVerifying mock data..."
+    ./scripts/verify_mock_data.sh --host=docker --port=5432
+    echo -e "\e[0Ksection_end:$(date +%s):verify\r\e[0K"
 
     echo -e "\e[0Ksection_start:$(date +%s):save_cache[collapsed=true]\r\e[0KSaving mock cache..."
     EFFECTIVE_CACHE_KEY=$(cat /tmp/effective_cache_key)
@@ -563,6 +555,9 @@ sync_with_mock_data:
 
     pushd docker
     IFS=" " read -ra COMPOSE_OPTIONS <<< "$COMPOSE_OPTIONS_STRING"
+
+    echo "Requesting PostgreSQL checkpoint..."
+    docker compose "${COMPOSE_OPTIONS[@]}" exec -T haf psql -U haf_admin -d haf_block_log -c "CHECKPOINT;" || true
 
     echo "Stopping PostgreSQL with pg_ctl..."
     PG_CTL=$(docker compose "${COMPOSE_OPTIONS[@]}" exec -T --user postgres haf \
@@ -576,8 +571,9 @@ sync_with_mock_data:
       echo "WARNING: pg_ctl not found, relying on docker compose down"
     fi
 
-    docker compose "${COMPOSE_OPTIONS[@]}" logs --no-log-prefix haf > haf.log || true
-    docker compose "${COMPOSE_OPTIONS[@]}" logs --no-log-prefix fill-db-with-mock-data > mock-full.log || true
+    docker compose "${COMPOSE_OPTIONS[@]}" logs haf > haf.log || true
+    docker compose "${COMPOSE_OPTIONS[@]}" logs fill-db-with-mock-data > fill-db-with-mock-data.log || true
+    docker compose "${COMPOSE_OPTIONS[@]}" logs backend-block-processing > backend-block-processing.log || true
     docker compose "${COMPOSE_OPTIONS[@]}" down --timeout 60
     popd
 
@@ -605,8 +601,9 @@ sync_with_mock_data:
     if [[ "$CACHE_HIT" != "true" ]]; then
       pushd docker
       IFS=" " read -ra COMPOSE_OPTIONS <<< "${COMPOSE_OPTIONS_STRING:-}"
-      docker compose "${COMPOSE_OPTIONS[@]}" logs --no-log-prefix haf > haf.log 2>&1 || true
-      docker compose "${COMPOSE_OPTIONS[@]}" logs --no-log-prefix fill-db-with-mock-data > mock-full.log 2>&1 || true
+      docker compose "${COMPOSE_OPTIONS[@]}" logs haf > haf.log 2>&1 || true
+      docker compose "${COMPOSE_OPTIONS[@]}" logs fill-db-with-mock-data > fill-db-with-mock-data.log 2>&1 || true
+      docker compose "${COMPOSE_OPTIONS[@]}" logs backend-block-processing > backend-block-processing.log 2>&1 || true
       docker compose "${COMPOSE_OPTIONS[@]}" down --timeout 30 2>&1 || true
       popd
       tar -czvf docker/container-logs.tar.gz docker/*.log 2>/dev/null || true
@@ -615,8 +612,6 @@ sync_with_mock_data:
     echo -e "\e[0Ksection_end:$(date +%s):cleanup\r\e[0K"
   artifacts:
     paths:
-    - docker/haf.log
-    - docker/mock-full.log
     - docker/container-logs.tar.gz
     expire_in: 1 week
     when: always
@@ -818,10 +813,8 @@ regression-test:
   - |
     echo -e "\e[0Ksection_start:$(date +%s):tests\r\e[0KRunning regression tests..."
 
-    pip install --quiet psycopg2-binary 2>/dev/null || true
-    python3 ./scripts/test_bootstrap.py regression-full \
-      --host=${HAF_HOST} --type=all \
-      --log-file=tests/regression/regression_test.log
+    cd tests/regression
+    ./run_test.sh --host=${HAF_HOST} --type=all
 
     echo -e "\e[0Ksection_end:$(date +%s):tests\r\e[0K"
   artifacts:
@@ -829,7 +822,6 @@ regression-test:
     - docker/container-logs.txt
     - tests/regression/regression_test.log
     when: always
-    expire_in: 1 week
 
 setup-scripts-test:
   extends: .hafbe_test_base

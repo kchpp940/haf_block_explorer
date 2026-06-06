@@ -1,2 +1,5 @@
-# Exclude submodules directory (populated by other jobs using fetch strategy)
+.git/
+__pycache__/
 submodules/
+docker/
+tests/mocks/sql/types.sql

@@ -32,18 +32,36 @@ services:
     entrypoint:
       - /bin/bash
       - -lc
-      - python3 ./scripts/test_bootstrap.py mock-full --host=haf --port=5432
+      - ./tests/mocks/install_mock_data.sh --host=haf --port=5432
     environment:
       POSTGRES_HOST: haf
     volumes:
       - ../tests/mocks:/home/hived/haf_block_explorer/tests/mocks:ro
-      - ../tests/regression:/home/hived/haf_block_explorer/tests/regression:ro
-      - ../scripts:/home/hived/haf_block_explorer/scripts:ro
     networks:
       haf-network:
     depends_on:
       haf:
         condition: service_healthy
+
+  backend-block-processing:
+    image: ${BACKEND_REGISTRY:-registry.gitlab.syncad.com/hive/haf_block_explorer}:${BACKEND_VERSION:-latest}
+    command:
+      - process_blocks
+      - --log-file=STDOUT
+    environment:
+      POSTGRES_HOST: haf
+      POSTGRES_USER: hafbe_owner
+    networks:
+      haf-network:
+    healthcheck:
+      test: ["CMD-SHELL","/app/block-processing-healthcheck.sh"]
+      interval: 60s
+      timeout: 5s
+      retries: 20
+      start_period: 72h
+    depends_on:
+      fill-db-with-mock-data:
+        condition: service_completed_successfully
 
 networks:
   haf-network:

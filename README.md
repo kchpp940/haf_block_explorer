@@ -672,9 +672,58 @@ Contributions are welcome! Please follow these guidelines:
    - SQL: Max 170 char lines, use `SET ROLE hafbe_owner;`
    - Bash: Use `set -euo pipefail`, include `--help` option
    - Python: Python 3.12+, use Poetry for dependencies
-3. **Add tests** for new functionality
-4. **Update documentation** in `scripts/claude/` for significant changes
-5. **Submit a merge request** with clear description
+3. **Run the local quality checks before submitting** (see below)
+4. **Add tests** for new functionality
+5. **Update documentation** in `scripts/claude/` for significant changes
+6. **Submit a merge request** with clear description
+
+### Pre-Submit Quality Checks (Local CI Gate)
+
+Before submitting a merge request, run the unified project checker to replicate
+the lint and validation gates that CI runs:
+
+```bash
+# Run all checks (SQL lint, shell lint, OpenAPI validation, Python tests)
+./scripts/check_project.sh
+
+# Run individual checks
+./scripts/check_project.sh --sql        # SQLFluff only
+./scripts/check_project.sh --shell      # ShellCheck only
+./scripts/check_project.sh --openapi    # OpenAPI rewrite validation
+./scripts/check_project.sh --python     # Python package tests
+
+# Auto-fix where supported (SQLFluff fix mode)
+./scripts/check_project.sh --sql --fix
+
+# Verbose output for debugging failures
+./scripts/check_project.sh --verbose
+```
+
+**What it checks** (mirrors CI lint/test gates):
+
+| Check | Tool | What it validates |
+|-------|------|-------------------|
+| SQL lint | sqlfluff | SQL code style (max 170 chars, naming, casing) |
+| Shell lint | shellcheck | Bash script syntax and best practices |
+| OpenAPI rewrite | pytest (`scripts/api_generation/tests/`) | Rewrite rules, endpoint extraction, spec consistency |
+| Python package tests | pytest (`scripts/python_api_package/tests/`) | Package import, generated client, endpoint sync |
+
+> **Tip**: Any of these failing locally will also fail in CI. Run `./scripts/check_project.sh` before pushing to save a pipeline round-trip.
+
+Required tooling (optional — checks gracefully skip if missing):
+
+```bash
+# SQL lint
+pip install sqlfluff
+
+# Shell lint (via your package manager)
+brew install shellcheck         # macOS
+apt-get install shellcheck      # Debian/Ubuntu
+
+# Python test dependencies
+cd scripts/api_generation && poetry install
+cd scripts/python_api_package && poetry install
+```
 
 ### Development Workflow
 
@@ -687,6 +736,9 @@ vim backend/endpoint_helpers/your_function.sql
 
 # Install changes
 ./scripts/install_app.sh --host=localhost
+
+# Run pre-submit checks (same gates as CI)
+./scripts/check_project.sh
 
 # Run tests
 cd tests/tavern/patterns-mainnet && pytest -n 8 .

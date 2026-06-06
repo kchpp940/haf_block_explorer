@@ -78,6 +78,54 @@ These scripts help with common development and debugging tasks. **Use them autom
 
 ---
 
+### Project Quality Checker (Local CI Gate)
+
+**Location**: `scripts/check_project.sh`
+
+**Use when**:
+- User wants to run all CI lint/validation gates locally before submitting
+- User asks "how do I check my code like CI does?"
+- Debugging lint/style failures that would fail CI
+- Before a merge request, to verify all static checks pass
+
+**Usage**:
+```bash
+# Run all checks (default)
+./scripts/check_project.sh
+
+# Run individual checks
+./scripts/check_project.sh --sql        # SQLFluff lint only
+./scripts/check_project.sh --shell      # ShellCheck lint only
+./scripts/check_project.sh --openapi    # OpenAPI rewrite validation only
+./scripts/check_project.sh --python     # Python package tests only
+
+# Auto-fix where supported (SQLFluff)
+./scripts/check_project.sh --sql --fix
+
+# Verbose output for debugging
+./scripts/check_project.sh --verbose
+```
+
+**What it does** (mirrors the CI lint/test stage):
+1. **SQLFluff** — Lints all `.sql` files against the project style (max 170 lines, postgres dialect, naming/casing conventions per `.sqlfluff`
+2. **ShellCheck** — Lints all `.sh` scripts for syntax errors and best-practice violations (excludes the same SC codes CI uses)
+3. **OpenAPI rewrite validation** — Runs `pytest scripts/api_generation/tests/` to verify rewrite rules, endpoint extraction, and spec fixtures are in sync
+4. **Python package tests** — Runs `pytest scripts/python_api_package/tests/` to verify the generated API client, package import, and endpoint sync
+
+**Output**:
+- Color-coded `[PASS]`, `[FAIL]`, `[SKIP]` per check
+- Final summary with pass/fail/skip counts
+- Non-zero exit code if any check fails (same as CI)
+- Missing tools are gracefully skipped with install hints
+
+**Requirements**:
+- `sqlfluff` (pip installable, optional)
+- `shellcheck` (system package, optional)
+- `python3` + `pytest` + `poetry` (optional, for OpenAPI/Python checks)
+- Checks that cannot run are **skipped**, not failed — so the script always runs end-to-end.
+
+---
+
 ### Mock Data Installer + Verifier
 
 **Location**: `tests/mocks/install_mock_data.sh` + `scripts/verify_mock_data.sh`
@@ -125,6 +173,11 @@ These scripts help with common development and debugging tasks. **Use them autom
 | "Reproduce CI mock pipeline locally" | `docker compose -f docker/docker-compose-mocks.yml up` (no `--stop-at-block`; wait for `hive.is_app_in_sync`) |
 | "Test sync performance" | `run_sync_test.sh` |
 | "Benchmark block processing" | `run_sync_test.sh` |
+| "Run lint / quality checks before submitting" | `check_project.sh` |
+| "How do I run CI checks locally?" | `check_project.sh` |
+| "Check my SQL style before pushing" | `check_project.sh --sql` |
+| "Check shell scripts for errors" | `check_project.sh --shell` |
+| "Validate OpenAPI rewrite rules" | `check_project.sh --openapi` |
 
 ## Error Patterns by Job Type
 
@@ -161,3 +214,4 @@ When adding new utility scripts:
 | New utility script | Add to "Available Tools" section |
 | New CI job type | Add error patterns to `check-hafbe-pipeline.sh` |
 | New debugging task | Consider creating a helper script |
+| New lint/quality gate | Add a step to `scripts/check_project.sh` and update this file |
