@@ -54,13 +54,15 @@ USER root
 
 RUN <<EOF
   set -e
-  apk --no-cache add curl
+  apk --no-cache add curl python3 py3-psycopg2
   deluser haf_admin 2>/dev/null || true
   adduser -D -u 1000 -G users -h /home/hived hived
   mkdir -p /home/hived/haf_block_explorer/scripts
   mkdir -p /home/hived/haf_block_explorer/queries
   mkdir -p /home/hived/haf_block_explorer/postgrest
   mkdir -p /home/hived/haf_block_explorer/haf/scripts
+  mkdir -p /home/hived/haf_block_explorer/tests/mocks
+  mkdir -p /home/hived/haf_block_explorer/tests/regression
   mkdir /app
   chown -R hived:users /home/hived /app
 EOF
@@ -77,8 +79,12 @@ COPY --chown=hived:users scripts/install_app.sh /home/hived/haf_block_explorer/s
 COPY --chown=hived:users scripts/process_blocks.sh /home/hived/haf_block_explorer/scripts/process_blocks.sh
 COPY --chown=hived:users scripts/uninstall_app.sh /home/hived/haf_block_explorer/scripts/uninstall_app.sh
 COPY --chown=hived:users scripts/generate_version_sql.sh /home/hived/haf_block_explorer/scripts/generate_version_sql.sh
+COPY --chown=hived:users scripts/test_bootstrap.py /home/hived/haf_block_explorer/scripts/test_bootstrap.py
 COPY --chown=hived:users docker/scripts/docker_entrypoint.sh /home/hived/haf_block_explorer/scripts/docker_entrypoint.sh
 COPY --from=version-calculcation --chown=hived:users /home/hived/src/scripts/set_version_in_sql.pgsql /home/hived/haf_block_explorer/scripts/set_version_in_sql.pgsql
+
+COPY --chown=hived:users tests/mocks /home/hived/haf_block_explorer/tests/mocks
+COPY --chown=hived:users tests/regression /home/hived/haf_block_explorer/tests/regression
 
 WORKDIR /home/hived/haf_block_explorer/scripts
 

@@ -36,30 +36,35 @@ import os
 import shlex
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
 
-# psycopg2 is imported lazily on first database connection so that
-# ``--help`` and friend work without the driver installed.
-psycopg2 = None  # type: ignore
-RealDictCursor = None  # type: ignore
+# psycopg2 is imported at module load but import failures are deferred until
+# the first database connection attempt, so ``--help`` and friend work even
+# without the driver installed.
+_PSYCOPG2_IMPORT_ERROR: Optional[ImportError] = None
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+    _PSYCOPG2_ERROR = psycopg2.Error
+    _PSYCOPG2_OPERATIONAL_ERROR = psycopg2.OperationalError
+except ImportError as _exc:
+    psycopg2 = None  # type: ignore
+    RealDictCursor = None  # type: ignore
+    _PSYCOPG2_IMPORT_ERROR = _exc
+    _PSYCOPG2_ERROR = Exception
+    _PSYCOPG2_OPERATIONAL_ERROR = OSError
 
 
-def _ensure_psycopg2():
-    global psycopg2, RealDictCursor
-    if psycopg2 is not None:
-        return
-    try:
-        import psycopg2 as _psycopg2
-        from psycopg2.extras import RealDictCursor as _RealDictCursor
-    except ImportError:
+def _ensure_psycopg2() -> None:
+    if _PSYCOPG2_IMPORT_ERROR is not None:
         sys.stderr.write(
             "ERROR: psycopg2 is required. Install with: pip install psycopg2-binary\n"
+            f"  ({_PSYCOPG2_IMPORT_ERROR})\n"
         )
         sys.exit(2)
-    psycopg2 = _psycopg2
-    RealDictCursor = _RealDictCursor
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +178,96 @@ def add_db_args(parser: argparse.ArgumentParser) -> None:
                         help="PostgreSQL database (default: haf_block_log)")
     parser.add_argument("--url", default=os.environ.get("POSTGRES_URL", ""),
                         help="Full PostgreSQL URL (overrides --host/--port/--user/--database)")
+    parser.add_argument("--skip-if-no-db", action="store_true",
+                        help="Exit 0 cleanly if database is unreachable (for local dev / optional CI)")
+
+
+def _preflight_db(db: DBConfig, skip_if_no_db: bool = False,
+                  connect_timeout_sec: int = 5) -> None:
+    """Verify database connectivity before running any subcommand.
+
+    On failure either exits 0 (``--skip-if-no-db``) or exits 3 with an
+    actionable diagnostic message suggesting what the operator should do next
+    (start Docker, verify HAF service is up, check ports, etc.).
+    """
+    import socket
+
+    # First try a TCP-level connect so we can distinguish "port not open"
+    # from "PostgreSQL rejects auth" — different advice for each.
+    try:
+        with socket.create_connection((db.host, db.port), timeout=connect_timeout_sec):
+            pass
+    except OSError as exc:
+        msg = (
+            f"Cannot reach PostgreSQL at {db.host}:{db.port} "
+            f"(socket error: {exc.__class__.__name__}: {exc})"
+        )
+        if skip_if_no_db:
+            sys.stderr.write(f"{C_YELLOW}{msg}{C_RESET}\n")
+            sys.stderr.write(
+                f"{C_YELLOW}--skip-if-no-db set — exiting 0 without running tests.{C_RESET}\n"
+            )
+            sys.exit(0)
+        sys.stderr.write(f"\n{C_RED}{C_BOLD}ERROR: {msg}{C_RESET}\n")
+        in_ci = os.environ.get("CI", "") == "true"
+        in_docker = os.path.exists("/.dockerenv") or os.environ.get("DOCKER_HOST", "")
+        sys.stderr.write(f"\n{C_BOLD}  Suggested next steps:{C_RESET}\n")
+        if in_ci:
+            sys.stderr.write(
+                f"    - Is the Docker-in-Docker 'docker' service healthy?\n"
+                f"    - Did docker-compose up finish starting the HAF container?\n"
+                f"    - Check container logs: docker compose logs haf\n"
+            )
+        elif in_docker:
+            sys.stderr.write(
+                f"    - Is the HAF / 'haf' container reachable on this Docker network?\n"
+                f"    - Check HAF health: docker inspect --format='{{{{.State.Health.Status}}}}' <container>\n"
+            )
+        else:
+            sys.stderr.write(
+                f"    - Is Docker running?  (docker ps)\n"
+                f"    - Start the HAF environment:  cd docker && docker compose up -d\n"
+                f"    - Verify the HAF service is healthy:  docker compose ps\n"
+                f"    - Is PostgreSQL listening on {db.port}?  (lsof -i :{db.port})\n"
+            )
+        sys.stderr.write(
+            f"    - Connection string used:  postgresql://{db.user}@{db.host}:{db.port}/{db.database}\n\n"
+        )
+        sys.exit(3)
+
+    # TCP works — now try a real PostgreSQL handshake so we catch auth /
+    # wrong-database errors with their own advice.
+    try:
+        conn = db.connect()
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT 1")
+        finally:
+            conn.close()
+    except _PSYCOPG2_OPERATIONAL_ERROR as exc:
+        msg = f"PostgreSQL at {db.host}:{db.port} responded but is not usable: {exc}"
+        if skip_if_no_db:
+            sys.stderr.write(f"{C_YELLOW}{msg}{C_RESET}\n")
+            sys.stderr.write(
+                f"{C_YELLOW}--skip-if-no-db set — exiting 0 without running tests.{C_RESET}\n"
+            )
+            sys.exit(0)
+        sys.stderr.write(f"\n{C_RED}{C_BOLD}ERROR: {msg}{C_RESET}\n")
+        sys.stderr.write(
+            f"\n{C_BOLD}  Suggested next steps:{C_RESET}\n"
+            f"    - Is the database '{db.database}' created?\n"
+            f"    - Does user '{db.user}' have access?\n"
+            f"    - Connection string used:  postgresql://{db.user}@{db.host}:{db.port}/{db.database}\n\n"
+        )
+        sys.exit(3)
+    except _PSYCOPG2_ERROR as exc:
+        if skip_if_no_db:
+            sys.stderr.write(f"{C_YELLOW}Database error: {exc}{C_RESET}\n")
+            sys.stderr.write(
+                f"{C_YELLOW}--skip-if-no-db set — exiting 0 without running tests.{C_RESET}\n"
+            )
+            sys.exit(0)
+        raise
 
 
 def db_from_args(args: argparse.Namespace) -> DBConfig:
@@ -199,6 +294,18 @@ def run_sql_file(db: DBConfig, sql_path: Path, set_search_path: Optional[str] = 
         conn.close()
 
 
+DIAGNOSTICS_SQL = MOCKS_SQL_DIR / "diagnostics.sql"
+
+
+def _ensure_diagnostics_sql(db: DBConfig) -> None:
+    """Idempotently install the hafbe_backend.diagnose_* helper functions.
+
+    Safe to call multiple times — diagnostics.sql uses ``CREATE OR REPLACE
+    FUNCTION``.  Raises if the HAFBE backend schema is not present.
+    """
+    run_sql_file(db, DIAGNOSTICS_SQL)
+
+
 def run_sql(db: DBConfig, sql: str, set_search_path: Optional[str] = None,
             use_dict_cursor: bool = False):
     conn = db.connect()
@@ -222,6 +329,7 @@ def run_sql(db: DBConfig, sql: str, set_search_path: Optional[str] = None,
 
 def cmd_check(args: argparse.Namespace) -> int:
     db = db_from_args(args)
+    _preflight_db(db, getattr(args, "skip_if_no_db", False))
     overall_ok = True
     failures: dict[str, list[str]] = {
         "Missing tables / schemas": [],
@@ -235,6 +343,18 @@ def cmd_check(args: argparse.Namespace) -> int:
     sys.stderr.write(f"  Host:     {db.host}:{db.port}\n")
     sys.stderr.write(f"  User:     {db.user}\n")
     sys.stderr.write(f"  Database: {db.database}\n\n")
+
+    # Install / refresh diagnostic functions (idempotent) so that the
+    # diagnose_* queries below always have something to call.
+    try:
+        _ensure_diagnostics_sql(db)
+    except (_PSYCOPG2_ERROR, FileNotFoundError) as exc:
+        msg = f"cannot install diagnostic SQL: {exc}"
+        _print_status("diagnostics setup", "FAIL", msg)
+        for key in failures:
+            failures[key].append(msg)
+        sys.stderr.write(f"{C_RED}{C_BOLD}  ✗ Diagnostics unavailable — HAFBE not installed?{C_RESET}\n\n")
+        return 3
 
     # 1. Core schema / tables
     _print_header("1. Core HAFBE schema & tables")
@@ -250,7 +370,7 @@ def cmd_check(args: argparse.Namespace) -> int:
                     f"{schema}.{obj_name} ({obj_type})"
                 )
         _print_table(["schema", "type", "name", "status"], table_rows)
-    except psycopg2.Error as exc:
+    except _PSYCOPG2_ERROR as exc:
         overall_ok = False
         msg = f"cannot query diagnose_missing_tables(): {exc}"
         _print_status("schema diagnostics", "FAIL", msg)
@@ -268,7 +388,7 @@ def cmd_check(args: argparse.Namespace) -> int:
                 failures["Missing mock block ranges"].append(
                     f"{check_name}: expected {expected}, got {actual} — {detail}"
                 )
-    except psycopg2.Error as exc:
+    except _PSYCOPG2_ERROR as exc:
         msg = f"cannot query diagnose_mock_block_range(): {exc}"
         _print_status("block range diagnostics", "FAIL", msg)
         overall_ok = False
@@ -291,7 +411,7 @@ def cmd_check(args: argparse.Namespace) -> int:
             ["context", "current", "irreversible", "consistent", "status"],
             table_rows,
         )
-    except psycopg2.Error as exc:
+    except _PSYCOPG2_ERROR as exc:
         msg = f"cannot query diagnose_context_state(): {exc}"
         _print_status("context diagnostics", "FAIL", msg)
         overall_ok = False
@@ -310,7 +430,7 @@ def cmd_check(args: argparse.Namespace) -> int:
                     f"{schema}.{obj_name} ({obj_type})"
                 )
         _print_table(["schema", "type", "name", "status"], table_rows)
-    except psycopg2.Error:
+    except _PSYCOPG2_ERROR:
         _print_status("regression schema not installed", "IN_PROGRESS",
                       "run 'regression-install' to set up hafbe_test")
 
@@ -323,7 +443,7 @@ def cmd_check(args: argparse.Namespace) -> int:
             if status == "FAIL":
                 overall_ok = False
                 failures["Expected data not loaded"].append(f"{table_name}: {detail}")
-    except psycopg2.Error:
+    except _PSYCOPG2_ERROR:
         _print_status("expected-data check skipped", "IN_PROGRESS",
                       "hafbe_test schema not yet installed")
 
@@ -353,6 +473,7 @@ def _get_expected_mock_block_range() -> tuple[int, int]:
 
 def cmd_mock_install(args: argparse.Namespace) -> int:
     db = db_from_args(args)
+    _preflight_db(db, getattr(args, "skip_if_no_db", False))
     _print_header("Mock data installation")
     sys.stderr.write(f"  Host: {db.host}:{db.port}  User: {db.user}\n\n")
 
@@ -364,7 +485,7 @@ def cmd_mock_install(args: argparse.Namespace) -> int:
         sys.stderr.write(f"  - installing {sql_name}\n")
         try:
             run_sql_file(db, sql_path)
-        except (psycopg2.Error, FileNotFoundError) as exc:
+        except (_PSYCOPG2_ERROR, FileNotFoundError) as exc:
             sys.stderr.write(f"{C_RED}    ERROR: {exc}{C_RESET}\n")
             return 3
     sys.stderr.write("  done.\n\n")
@@ -380,7 +501,7 @@ def cmd_mock_install(args: argparse.Namespace) -> int:
             cur.execute("SELECT hafbe_backend.insert_mock_blocks(%s)", (blocks_data,))
         finally:
             conn.close()
-    except psycopg2.Error as exc:
+    except _PSYCOPG2_ERROR as exc:
         sys.stderr.write(f"{C_RED}  ERROR inserting mock blocks: {exc}{C_RESET}\n")
         return 3
     sys.stderr.write("  done.\n\n")
@@ -396,7 +517,7 @@ def cmd_mock_install(args: argparse.Namespace) -> int:
             cur.execute("SELECT hafbe_backend.insert_mock_operations(%s)", (ops_data,))
         finally:
             conn.close()
-    except psycopg2.Error as exc:
+    except _PSYCOPG2_ERROR as exc:
         sys.stderr.write(f"{C_RED}  ERROR inserting mock operations: {exc}{C_RESET}\n")
         return 3
     sys.stderr.write("  done.\n\n")
@@ -408,7 +529,7 @@ def cmd_mock_install(args: argparse.Namespace) -> int:
         if rows:
             start_block, end_block = rows[0]
             sys.stderr.write(f"  Block range: {start_block}..{end_block}\n")
-    except psycopg2.Error as exc:
+    except _PSYCOPG2_ERROR as exc:
         sys.stderr.write(f"{C_RED}  ERROR rewinding contexts: {exc}{C_RESET}\n")
         return 3
 
@@ -423,7 +544,7 @@ def cmd_mock_install(args: argparse.Namespace) -> int:
         rows = run_sql(db, "SELECT * FROM hafbe_backend.diagnose_context_state()")
         for ctx, cur, irrev, consistent, status, detail in rows:
             _print_status(f"context {ctx}", status, detail)
-    except psycopg2.Error as exc:
+    except _PSYCOPG2_ERROR as exc:
         sys.stderr.write(f"{C_YELLOW}  diagnostics unavailable: {exc}{C_RESET}\n")
 
     min_b, max_b = _get_expected_mock_block_range()
@@ -446,9 +567,16 @@ def cmd_mock_install(args: argparse.Namespace) -> int:
 
 def cmd_mock_verify(args: argparse.Namespace) -> int:
     db = db_from_args(args)
+    _preflight_db(db, getattr(args, "skip_if_no_db", False))
     btracker_schema = os.environ.get("BTRACKER_SCHEMA", "hafbe_bal")
     _print_header("Mock data verification")
     sys.stderr.write(f"  Host: {db.host}:{db.port}  User: {db.user}\n\n")
+
+    # Install / refresh diagnostic functions first
+    try:
+        _ensure_diagnostics_sql(db)
+    except (_PSYCOPG2_ERROR, FileNotFoundError) as exc:
+        sys.stderr.write(f"{C_YELLOW}  diagnostics install skipped: {exc}{C_RESET}\n")
 
     # Step 1: Pre-verify diagnostics (fail fast with structured output)
     sys.stderr.write("Step 1/3: Running pre-verify diagnostics...\n")
@@ -463,7 +591,7 @@ def cmd_mock_verify(args: argparse.Namespace) -> int:
             if status == "FAIL":
                 any_fail = True
                 missing_tables.append(f"{schema}.{obj_name} ({obj_type})")
-    except psycopg2.Error as exc:
+    except _PSYCOPG2_ERROR as exc:
         sys.stderr.write(f"{C_YELLOW}  schema diagnostics skipped: {exc}{C_RESET}\n")
 
     try:
@@ -476,7 +604,7 @@ def cmd_mock_verify(args: argparse.Namespace) -> int:
                 missing_blocks.append(
                     f"{check_name}: expected {expected}, got {actual} — {detail}"
                 )
-    except psycopg2.Error as exc:
+    except _PSYCOPG2_ERROR as exc:
         sys.stderr.write(f"{C_YELLOW}  block-range diagnostics skipped: {exc}{C_RESET}\n")
 
     try:
@@ -486,7 +614,7 @@ def cmd_mock_verify(args: argparse.Namespace) -> int:
             if status == "FAIL":
                 any_fail = True
                 missing_blocks.append(f"context {ctx}: {detail}")
-    except psycopg2.Error as exc:
+    except _PSYCOPG2_ERROR as exc:
         sys.stderr.write(f"{C_YELLOW}  context diagnostics skipped: {exc}{C_RESET}\n")
 
     if any_fail:
@@ -515,7 +643,7 @@ def cmd_mock_verify(args: argparse.Namespace) -> int:
         """)
         run_sql(db, "SELECT hafbe_app.process_proposal_vote_stats_cache()",
                 set_search_path=f"{btracker_schema},public")
-    except psycopg2.Error as exc:
+    except _PSYCOPG2_ERROR as exc:
         sys.stderr.write(f"{C_RED}  ERROR refreshing caches: {exc}{C_RESET}\n")
         return 3
     sys.stderr.write("  done.\n")
@@ -536,37 +664,49 @@ def cmd_mock_verify(args: argparse.Namespace) -> int:
             results = cur.fetchall()
             for row in results:
                 sys.stderr.write("  " + " | ".join(str(c) for c in row) + "\n")
-    except psycopg2.Error as exc:
+    except _PSYCOPG2_ERROR as exc:
         err_msg = str(exc)
         sys.stderr.write(f"\n{C_RED}{C_BOLD}  verify.sql FAILED{C_RESET}\n")
         sys.stderr.write(f"{C_RED}  {err_msg}{C_RESET}\n\n")
 
-        # Extract per-check failures from the verify temp view
+        # _hafbe_mock_checks is a TEMP VIEW — it only exists within THIS
+        # connection session.  We MUST reuse `conn` (not open a new one),
+        # otherwise `SELECT * FROM _hafbe_mock_checks` fails with "relation
+        # does not exist".  Roll back any aborted transaction state first so
+        # we can re-query on the same session.
         try:
-            diag_conn = db.connect()
-            try:
-                diag_conn.autocommit = True
-                diag_cur = diag_conn.cursor()
-                diag_cur.execute(f"SET search_path TO {btracker_schema},public")
-                diag_cur.execute("""
-                    SELECT name, expected, actual, result FROM _hafbe_mock_checks
-                    WHERE result = 'FAIL'
-                    ORDER BY name
-                """)
-                failed = diag_cur.fetchall()
-                if failed:
-                    mismatched_endpoints = [
-                        f"{name}: expected={expected}, actual={actual or '<null>'}"
-                        for name, expected, actual, _ in failed
-                    ]
-            finally:
-                diag_conn.close()
-        except psycopg2.Error:
+            conn.rollback()
+        except _PSYCOPG2_ERROR:
             pass
+        try:
+            diag_cur = conn.cursor()
+            diag_cur.execute(f"SET search_path TO {btracker_schema},public")
+            diag_cur.execute("""
+                SELECT name, expected, actual, result FROM _hafbe_mock_checks
+                WHERE result = 'FAIL'
+                ORDER BY name
+            """)
+            failed = diag_cur.fetchall()
+            if failed:
+                mismatched_endpoints = [
+                    f"{name}: expected={expected}, actual={actual or '<null>'}"
+                    for name, expected, actual, _ in failed
+                ]
+        except _PSYCOPG2_ERROR as diag_exc:
+            sys.stderr.write(
+                f"{C_YELLOW}  (could not read _hafbe_mock_checks: {diag_exc}){C_RESET}\n"
+            )
+        finally:
+            try:
+                diag_cur.close()
+            except Exception:
+                pass
 
         _print_error_section("Mismatched endpoints / assertions", mismatched_endpoints)
         sys.stderr.write("\n")
         return 1
+    finally:
+        conn.close()
 
     _print_header("Mock verification complete")
     sys.stderr.write(f"{C_GREEN}{C_BOLD}  ✓ All mock assertions passed{C_RESET}\n\n")
@@ -579,6 +719,7 @@ def cmd_mock_verify(args: argparse.Namespace) -> int:
 
 def cmd_mock_full(args: argparse.Namespace) -> int:
     db = db_from_args(args)
+    _preflight_db(db, getattr(args, "skip_if_no_db", False))
 
     rc = cmd_mock_install(args)
     if rc != 0:
@@ -611,15 +752,23 @@ def cmd_mock_full(args: argparse.Namespace) -> int:
 # Subcommand: regression-install
 # ---------------------------------------------------------------------------
 
-def _ensure_psycopg2():
-    """Already imported at module level; keep as a no-op hook for callers."""
-    pass
-
-
 def _gunzip_if_needed(gz_path: Path) -> Path:
-    """Decompress <name>.gz → <name>, returning the plain JSON path."""
-    plain = gz_path.with_suffix("")
+    """Decompress ``<name>.gz`` to a temp directory and return the plain path.
+
+    The source directory may be read-only (e.g. a Docker :ro volume mount), so
+    we always extract under the system temp dir keyed by the source's
+    modification time — no stale files, no write-permission issues.
+    """
+    if not gz_path.exists():
+        raise FileNotFoundError(f"gz fixture not found: {gz_path}")
+
+    cache_key = f"{gz_path.stem}-{gz_path.stat().st_mtime_ns}"
+    tmp_dir = Path(tempfile.gettempdir()) / "hafbe_test_bootstrap"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    plain = tmp_dir / gz_path.stem
+
     if not plain.exists():
+        sys.stderr.write(f"    extracting {gz_path.name} → {plain}\n")
         with gzip.open(gz_path, "rb") as src, open(plain, "wb") as dst:
             dst.write(src.read())
     return plain
@@ -627,6 +776,7 @@ def _gunzip_if_needed(gz_path: Path) -> Path:
 
 def cmd_regression_install(args: argparse.Namespace) -> int:
     db = db_from_args(args)
+    _preflight_db(db, getattr(args, "skip_if_no_db", False))
     test_type: str = args.type
     _print_header("Regression test installation")
     sys.stderr.write(f"  Host: {db.host}:{db.port}  User: {db.user}\n")
@@ -642,18 +792,16 @@ def cmd_regression_install(args: argparse.Namespace) -> int:
         sys.stderr.write(f"  - installing {sql_file.name}\n")
         try:
             run_sql_file(db, sql_file)
-        except (psycopg2.Error, FileNotFoundError) as exc:
+        except (_PSYCOPG2_ERROR, FileNotFoundError) as exc:
             sys.stderr.write(f"{C_RED}    ERROR: {exc}{C_RESET}\n")
             return 3
 
     # Also install diagnostics so subsequent checks can use them
-    diag_path = MOCKS_SQL_DIR / "diagnostics.sql"
-    if diag_path.exists():
+    try:
+        _ensure_diagnostics_sql(db)
         sys.stderr.write("  - installing diagnostics.sql\n")
-        try:
-            run_sql_file(db, diag_path)
-        except psycopg2.Error as exc:
-            sys.stderr.write(f"{C_YELLOW}    warning: {exc}{C_RESET}\n")
+    except (_PSYCOPG2_ERROR, FileNotFoundError) as exc:
+        sys.stderr.write(f"{C_YELLOW}    warning: {exc}{C_RESET}\n")
 
     sys.stderr.write("  done.\n\n")
 
@@ -693,7 +841,7 @@ def cmd_regression_install(args: argparse.Namespace) -> int:
         table_name = "expected_account_stats" if dtype == "account" else "expected_witness_props"
         try:
             run_sql(db, f"TRUNCATE hafbe_test.{table_name}")
-        except psycopg2.Error as exc:
+        except _PSYCOPG2_ERROR as exc:
             sys.stderr.write(f"{C_RED}ERROR truncating: {exc}{C_RESET}\n")
             return 3
 
@@ -708,7 +856,7 @@ def cmd_regression_install(args: argparse.Namespace) -> int:
                 if i % 1000 == 0:
                     sys.stderr.write(".")
                     sys.stderr.flush()
-        except psycopg2.Error as exc:
+        except _PSYCOPG2_ERROR as exc:
             sys.stderr.write(f"\n{C_RED}    ERROR loading {dtype} data: {exc}{C_RESET}\n")
             return 3
         finally:
@@ -728,7 +876,7 @@ def cmd_regression_install(args: argparse.Namespace) -> int:
             if status == "FAIL":
                 any_fail = True
                 _print_status(f"{schema}.{obj_name}", status, obj_type)
-    except psycopg2.Error as exc:
+    except _PSYCOPG2_ERROR as exc:
         sys.stderr.write(f"{C_YELLOW}  schema diagnostics skipped: {exc}{C_RESET}\n")
 
     try:
@@ -737,7 +885,7 @@ def cmd_regression_install(args: argparse.Namespace) -> int:
             _print_status(f"{table_name}", status, f"{row_count} rows — {detail}")
             if status == "FAIL":
                 any_fail = True
-    except psycopg2.Error as exc:
+    except _PSYCOPG2_ERROR as exc:
         sys.stderr.write(f"{C_YELLOW}  expected-data diagnostics skipped: {exc}{C_RESET}\n")
 
     _print_header("Regression installation complete")
@@ -759,6 +907,7 @@ def cmd_regression_install(args: argparse.Namespace) -> int:
 
 def cmd_regression_run(args: argparse.Namespace) -> int:
     db = db_from_args(args)
+    _preflight_db(db, getattr(args, "skip_if_no_db", False))
     test_type: str = args.type
     hafbe_schema: str = args.schema
     btracker_schema = os.environ.get("BTRACKER_SCHEMA", "hafbe_bal")
@@ -775,14 +924,14 @@ def cmd_regression_run(args: argparse.Namespace) -> int:
 
         try:
             run_sql(db, "TRUNCATE hafbe_test.differing_accounts")
-        except psycopg2.Error as exc:
+        except _PSYCOPG2_ERROR as exc:
             sys.stderr.write(f"{C_RED}  ERROR truncating differing_accounts: {exc}{C_RESET}\n")
             return 3
 
         try:
             run_sql(db, "SELECT hafbe_test.compare_accounts()",
                     set_search_path=hafbe_schema)
-        except psycopg2.Error as exc:
+        except _PSYCOPG2_ERROR as exc:
             sys.stderr.write(f"{C_RED}  ERROR comparing accounts: {exc}{C_RESET}\n")
             return 3
 
@@ -815,14 +964,14 @@ def cmd_regression_run(args: argparse.Namespace) -> int:
 
         try:
             run_sql(db, "TRUNCATE hafbe_test.differing_witnesses")
-        except psycopg2.Error as exc:
+        except _PSYCOPG2_ERROR as exc:
             sys.stderr.write(f"{C_RED}  ERROR truncating differing_witnesses: {exc}{C_RESET}\n")
             return 3
 
         try:
             run_sql(db, "SELECT hafbe_test.compare_witnesses()",
                     set_search_path=btracker_schema)
-        except psycopg2.Error as exc:
+        except _PSYCOPG2_ERROR as exc:
             sys.stderr.write(f"{C_RED}  ERROR comparing witnesses: {exc}{C_RESET}\n")
             return 3
 
@@ -940,7 +1089,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     try:
         return args.handler(args)
-    except psycopg2.OperationalError as exc:
+    except _PSYCOPG2_OPERATIONAL_ERROR as exc:
         sys.stderr.write(f"\n{C_RED}{C_BOLD}  Database connection error{C_RESET}\n")
         sys.stderr.write(f"  {exc}\n")
         sys.stderr.write(
