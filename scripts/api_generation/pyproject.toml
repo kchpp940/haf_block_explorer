@@ -10,7 +10,7 @@ source = [
 ]
 
 [tool.poetry.dependencies]
-python = ">=3.12,<4"
+python = ">=3.14,<4"
 hiveio-api-client-generator = "^1.7.1-post.0"
 hiveio-beekeepy = "^1.28.6-post.0"
 

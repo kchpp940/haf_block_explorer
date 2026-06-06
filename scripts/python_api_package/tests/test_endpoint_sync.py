@@ -11,6 +11,34 @@ API_GEN_DIR = SCRIPTS_DIR / "api_generation"
 PROJECT_ROOT = SCRIPTS_DIR.parent
 sys.path.insert(0, str(API_GEN_DIR))
 
+from generate_and_validate import (  # noqa: E402
+    check_client_exists,
+    verify_openapi_not_modified,
+    verify_rewrite_rules_not_modified,
+)
+
+_OK_FIXTURES, _MSG_FIXTURES = verify_openapi_not_modified()
+_OK_RULES, _MSG_RULES = verify_rewrite_rules_not_modified()
+_OK_CLIENT, _MSG_CLIENT = check_client_exists()
+
+if not (_OK_FIXTURES and _OK_RULES):
+    raise AssertionError(
+        "ENDPOINT SYNC CHECK FAILED (test_endpoint_sync pre-collection):\n"
+        f"  {_MSG_FIXTURES}\n"
+        f"  {_MSG_RULES}\n"
+        "\nRun: python scripts/api_generation/generate_and_validate.py export-fixtures\n"
+        "after modifying endpoints/endpoint_schema.sql or endpoints/rewrite_rules.conf,\n"
+        "then re-run the client generation and commit both the fixture and client changes."
+    )
+
+if not _OK_CLIENT:
+    raise AssertionError(
+        "ENDPOINT SYNC CHECK FAILED (test_endpoint_sync pre-collection):\n"
+        f"  {_MSG_CLIENT}\n"
+        "\nRun: python scripts/api_generation/generate_and_validate.py sync-client\n"
+        "and commit the generated files under scripts/python_api_package/hiveio_hafbe_api/hafbe_api_client/."
+    )
+
 from openapi_extractor import (  # noqa: E402
     load_openapi_spec,
 )
@@ -35,8 +63,12 @@ def operation_id_to_method_name(op_id: str) -> str:
 
 
 def path_to_method_name(path: str) -> str:
-    cleaned = path.strip("/").replace("/", "_").replace("{", "").replace("}", "")
-    return cleaned
+    segments = []
+    for seg in path.strip("/").split("/"):
+        if seg.startswith("{") and seg.endswith("}"):
+            continue
+        segments.append(seg.replace("-", "_"))
+    return "_".join(segments)
 
 
 OPERATION_ID_TO_PATHS = {
@@ -70,18 +102,34 @@ def _load_generated_client_class():
         f"Generated client file not found: {client_file}. "
         "Run `python scripts/api_generation/generate_and_validate.py sync-client`."
     )
-    spec = importlib.util.spec_from_file_location("hafbe_api_client_dynamic", client_file)
+    module_name = "hafbe_api_client_dynamic"
+    spec = importlib.util.spec_from_file_location(module_name, client_file)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
     for attr in dir(module):
         cls = getattr(module, attr)
-        if isinstance(cls, type) and attr.endswith("Api"):
+        if (
+            isinstance(cls, type)
+            and attr.endswith("Api")
+            and cls.__module__ == module_name
+        ):
             return cls
     raise AssertionError(
         "Could not locate generated API client class in hafbe_api_client.py. "
         "The client generator may have changed its output convention."
     )
+
+
+def _get_client_methods(client_cls: type) -> set[str]:
+    methods: set[str] = set()
+    for name in dir(client_cls):
+        if name.startswith("_"):
+            continue
+        val = getattr(client_cls, name, None)
+        if callable(val) or inspect.iscoroutinefunction(val) or inspect.isfunction(val) or inspect.ismethod(val):
+            methods.add(name)
+    return methods
 
 
 def test_client_package_directory_exists_and_has_modules():
@@ -143,8 +191,7 @@ def test_every_endpoint_has_corresponding_client_method():
     spec = load_openapi_spec(ENDPOINT_SCHEMA_SQL)
     client_cls = _load_generated_client_class()
 
-    methods = {name for name, _ in inspect.getmembers(client_cls, predicate=inspect.isfunction)}
-    methods |= {name for name, _ in inspect.getmembers(client_cls, predicate=inspect.ismethod)}
+    methods = _get_client_methods(client_cls)
 
     missing: list[str] = []
     for ep in spec.endpoints:
@@ -170,10 +217,11 @@ def test_get_account_parameter_names_match():
 
     client_cls = _load_generated_client_class()
     fn = getattr(client_cls, "get_account", None) or getattr(
-        client_cls, "accounts_account_name", None
+        client_cls, path_to_method_name(ep.path), None
     )
     assert fn is not None, (
         "get_account method not found on generated client. "
+        f"Looked for 'get_account' and '{path_to_method_name(ep.path)}'. "
         "Regenerate with `python scripts/api_generation/generate_and_validate.py sync-client`."
     )
 
@@ -196,12 +244,14 @@ def test_get_witness_voters_parameter_names_match():
 
     client_cls = _load_generated_client_class()
     fn = None
-    for candidate in ["get_witness_voters", "witnesses_account_name_voters"]:
+    path_based = path_to_method_name(ep.path)
+    for candidate in ["get_witness_voters", path_based]:
         if hasattr(client_cls, candidate):
             fn = getattr(client_cls, candidate)
             break
     assert fn is not None, (
         "get_witness_voters method not found on generated client. "
+        f"Looked for 'get_witness_voters' and '{path_based}'. "
         "Regenerate with `python scripts/api_generation/generate_and_validate.py sync-client`."
     )
 
@@ -234,7 +284,7 @@ def test_endpoints_with_error_responses_have_correct_mapping_in_schema():
             for r in ep.responses
             if r.status_code.startswith("4") or r.status_code.startswith("5")
         }
-        for code, desc in expected_errors:
+        for code, desc in expected_errors.items():
             assert code in actual_errors, (
                 f"{op_id} missing error response code {code}. "
                 f"Defined error codes: {sorted(actual_errors.keys())}. "

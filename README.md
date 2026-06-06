@@ -519,7 +519,8 @@ HAFBE uses a multi-layered testing strategy to ensure API correctness, data inte
 | **Regression** | Compare computed data against hived snapshots |
 | **Tavern** | Validate API response patterns (YAML-based) |
 | **Performance** | JMeter load testing for throughput measurement |
-| **Functional** | Verify install/uninstall scripts work correctly |
+| **Functional** | Verify install/uninstall scripts and API client sync |
+| **API Client Sync** | Verify Python client stays in sync with SQL endpoint definitions |
 
 ### Quick Test Commands
 
@@ -533,8 +534,11 @@ cd tests/tavern/patterns-mainnet && pytest -n 8 .
 # Performance tests with JMeter
 ./tests/performance/run_performance_tests.sh --postgrest-host=localhost
 
-# Functional script tests
+# Functional script tests (includes mandatory API client sync check)
 ./tests/functional/test_scripts.sh --host=localhost
+
+# Standalone API client sync check (runs in CI automatically)
+./scripts/check_api_client_sync.sh
 ```
 
 ### Test Types
@@ -561,10 +565,41 @@ JMeter-based load testing to measure endpoint throughput and response times.
 - **Output**: HTML dashboard at `result/result_report/index.html`
 
 #### Functional Tests
-Verifies install and uninstall scripts work correctly.
+Verifies install, uninstall, and API client sync scripts work correctly.
 
 - **Location**: `tests/functional/`
 - **Runner**: `./test_scripts.sh --host=localhost`
+- **Tests**:
+  1. **API Client Sync Check** — Mandatory: verifies Python client is up-to-date with SQL endpoint definitions
+  2. **Reinstall App** — Schema reinstall over existing installation
+  3. **Uninstall App** — Schema cleanup
+
+#### API Client Sync Tests (Mandatory)
+Ensures the generated Python API client stays in sync with SQL endpoint definitions.
+**Runs automatically in CI** — cannot be skipped.
+
+| Check | What it validates | Exit code on failure |
+|-------|-------------------|---------------------|
+| Fixture sync | `endpoints/endpoint_schema.sql` matches committed OpenAPI JSON fixture | 2 |
+| Rewrite rules sync | `endpoints/rewrite_rules.conf` matches committed fixture | 2 |
+| Client exists | Generated `hafbe_api_client/` directory present with `.py` files | 4 |
+| Client content | Freshly regenerated client byte-identical to checked-in version | 3 |
+| Parameter names | Client method signatures match endpoint path/query params | pytest fail |
+| Return types | 200-response `$ref` and primitive types match spec | pytest fail |
+| Error responses | 4xx/5xx status codes and descriptions match spec | pytest fail |
+
+**Entry points:**
+```bash
+# Unified script (what CI runs)
+./scripts/check_api_client_sync.sh
+
+# Individual checks
+python scripts/api_generation/generate_and_validate.py check-all
+python scripts/api_generation/generate_and_validate.py generate-diff --fail-on-change
+
+# Pytest module-level hard fail (cannot be skipped)
+cd scripts/python_api_package && pytest tests/test_endpoint_sync.py -v
+```
 
 ### CI/CD Integration
 
@@ -579,7 +614,41 @@ detect → lint → build → sync → test → publish
 | `regression-test` | Regression | `regression_test.log` |
 | `pattern-test` | Tavern | JUnit XML report |
 | `performance-test` | Performance | HTML report |
-| `setup-scripts-test` | Functional | - |
+| `setup-scripts-test` | Functional + **API Client Sync** | - |
+| `python_api_client_test` | **API Client Sync** + generated client integration | JUnit XML report |
+
+> **Note**: Both `setup-scripts-test` and `python_api_client_test` run `scripts/check_api_client_sync.sh`.
+> If you modify any SQL endpoint definition, you MUST run the sync workflow below and commit the
+> regenerated files — otherwise CI will fail hard and the merge request will be blocked.
+
+---
+
+## SQL Endpoint Change Workflow (Mandatory)
+
+**Any change to `endpoints/` requires committing the regenerated fixtures and client.**
+
+```bash
+# 1. Edit endpoint SQL or rewrite rules
+vim endpoints/accounts/get_account.sql
+vim endpoints/rewrite_rules.conf
+
+# 2. Export new baseline fixtures (captures the OpenAPI spec + rule ordering)
+python scripts/api_generation/generate_and_validate.py export-fixtures
+
+# 3. Regenerate the Python API client
+python scripts/api_generation/generate_and_validate.py sync-client
+
+# 4. Verify everything is in sync (CI runs exactly this)
+./scripts/check_api_client_sync.sh
+
+# 5. Commit ALL three together
+git add endpoints/
+git add scripts/api_generation/fixtures/
+git add scripts/python_api_package/hiveio_hafbe_api/hafbe_api_client/
+git commit -m "endpoints: <your change description>"
+```
+
+If step 4 fails, the CI jobs `setup-scripts-test` and `python_api_client_test` will also fail.
 
 ### Writing New Tests
 
@@ -587,6 +656,8 @@ detect → lint → build → sync → test → publish
 2. **Tavern**: Create `.tavern.yaml` file in appropriate `tests/tavern/patterns-mainnet/` directory
 3. **Performance**: Modify `tests/performance/endpoints.jmx` JMeter test plan
 4. **Functional**: Add tests to `tests/functional/test_scripts.sh`
+5. **API Client Sync**: Add assertions in `scripts/python_api_package/tests/test_endpoint_sync.py`
+   and parser logic in `scripts/api_generation/openapi_extractor.py`
 
 For detailed test documentation, see `scripts/claude/tests.md`.
 

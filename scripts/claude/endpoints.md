@@ -325,7 +325,30 @@ For RESTful paths, add to `endpoints/rewrite_rules.conf`:
 rewrite ^/hafbe-api/your-path$ /hafbe-api/rpc/your_function break;
 ```
 
-### Step 6: Install and test
+### Step 6: Regenerate and Commit Fixtures + Client (MANDATORY)
+
+After any change to `endpoints/` files, you MUST regenerate and commit the derived artifacts:
+
+```bash
+# Regenerate endpoint_schema.sql from individual SQL files (if you edited files outside endpoint_schema.sql)
+./scripts/openapi_rewrite.sh
+
+# Export new baseline fixtures (OpenAPI JSON + canonical rewrite rules)
+python scripts/api_generation/generate_and_validate.py export-fixtures
+
+# Regenerate the Python API client
+python scripts/api_generation/generate_and_validate.py sync-client
+
+# Verify — CI runs exactly this command; it must pass
+./scripts/check_api_client_sync.sh
+
+# Commit all three together
+git add endpoints/
+git add scripts/api_generation/fixtures/
+git add scripts/python_api_package/hiveio_hafbe_api/hafbe_api_client/
+```
+
+### Step 7: Install and test
 
 ```bash
 # Apply changes
@@ -333,6 +356,9 @@ rewrite ^/hafbe-api/your-path$ /hafbe-api/rpc/your_function break;
 
 # Test endpoint
 curl "http://localhost:3000/rpc/your_function?param-name=value"
+
+# Run the API sync tests
+cd scripts/python_api_package && pytest tests/test_endpoint_sync.py -v
 ```
 
 ## Expansion Rules

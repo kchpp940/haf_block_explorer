@@ -9,14 +9,18 @@ HAFBE uses a multi-layered testing strategy to ensure API correctness, data inte
 | **Regression** | Verify data matches hived snapshots | After processing changes |
 | **Tavern** | Validate API response patterns | After endpoint changes |
 | **Performance** | Measure endpoint throughput | Before releases |
-| **Functional** | Test install/uninstall scripts | After script changes |
+| **Functional** | Test install/uninstall scripts + API client sync | After script or endpoint changes |
 | **Mock** | Drive a synthetic block range through the real processor + endpoints | When you cannot wait for a HAF sync past the feature's launch block (e.g. DHF launch at block ~22.3M) |
+| **API Client Sync** | Verify Python client matches SQL endpoint schema | After ANY endpoint change; mandatory in CI |
 
 ## Quick Reference
 
 ### Run All Tests (CI does this)
 ```bash
 # From project root, with synced database
+
+# API Client Sync Check (always runs first — no database needed)
+./scripts/check_api_client_sync.sh
 
 # Regression tests
 cd tests/regression && ./run_test.sh --host=localhost --type=all
@@ -120,6 +124,48 @@ apps then reinstall — see `tests/mocks/README.md` for the reset procedure.
 
 All patterns use `compare_rest_response_with_pattern` against `.pat.json` files. Add new tests here when adding proposal-related features that require mock data.
 
+### API Client Sync Tests (Mandatory)
+
+Ensures the auto-generated Python API client (`hiveio_hafbe_api/hafbe_api_client/`) stays in sync with the SQL endpoint definitions. These tests cannot be skipped and run in two CI jobs.
+
+**Why this exists**: Developers modifying `endpoints/endpoint_schema.sql` or `endpoints/rewrite_rules.conf` used to forget to regenerate the Python client, causing downstream consumers to use stale method signatures.
+
+**Check layers** (all must pass):
+
+| Layer | Tool | Failure |
+|-------|------|---------|
+| OpenAPI fixture baseline | `generate_and_validate.py verify-fixtures` | exit 2 |
+| Rewrite rules baseline | `generate_and_validate.py verify-fixtures` | exit 2 |
+| Generated client exists | `generate_and_validate.py check-client` | exit 4 |
+| Generated client content match | `generate_and_validate.py generate-diff --fail-on-change` | exit 3 |
+| Parameter name mapping | `pytest tests/test_endpoint_sync.py` | AssertionError |
+| Return type / schema ref | `pytest tests/test_endpoint_sync.py` | AssertionError |
+| 4xx/5xx error response mapping | `pytest tests/test_endpoint_sync.py` | AssertionError |
+
+**Key files:**
+- `scripts/check_api_client_sync.sh` — Unified entry point (what CI runs)
+- `scripts/api_generation/generate_and_validate.py` — CLI with `export-fixtures`, `verify-fixtures`, `check-client`, `generate-diff`, `sync-client`, `check-all` subcommands
+- `scripts/api_generation/openapi_extractor.py` — Extracts and parses OpenAPI spec from `endpoint_schema.sql`
+- `scripts/api_generation/rewrite_rules_parser.py` — Canonical ordering of rewrite rules
+- `scripts/python_api_package/tests/test_endpoint_sync.py` — Pytest assertions (module-level hard fail on sync mismatch)
+- `scripts/api_generation/fixtures/openapi_spec.json` — Committed baseline OpenAPI spec
+- `scripts/api_generation/fixtures/rewrite_rules.conf` — Committed baseline rewrite rules
+
+**Developer workflow after endpoint changes:**
+```bash
+# 1. Export new fixtures
+python scripts/api_generation/generate_and_validate.py export-fixtures
+
+# 2. Regenerate client
+python scripts/api_generation/generate_and_validate.py sync-client
+
+# 3. Verify (CI runs exactly this)
+./scripts/check_api_client_sync.sh
+
+# 4. Commit all three: endpoint changes + fixtures + generated client
+git add endpoints/ scripts/api_generation/fixtures/ scripts/python_api_package/hiveio_hafbe_api/hafbe_api_client/
+```
+
 ## CI/CD Integration
 
 Tests run in GitLab CI pipeline (`.gitlab-ci.yml`):
@@ -138,9 +184,12 @@ detect → lint → build → sync → test → publish
 | `pattern-test` | Tavern (mainnet patterns) | JUnit XML report |
 | `pattern-test-with-mock-data` | Tavern (mock patterns) | JUnit XML report |
 | `performance-test` | Performance | HTML report, JUnit XML |
-| `setup-scripts-test` | Functional | - |
+| `setup-scripts-test` | Functional + **API Client Sync** | - |
+| `python_api_client_test` | **API Client Sync** + generated client integration | JUnit XML report |
 
 `pattern-test` runs against the 5M-block mainnet sync cache. `pattern-test-with-mock-data` runs against the `haf_hafbe_mock` cache prepared by `sync_with_mock_data` — it covers endpoints whose data only exists in the synthetic 91M block range (proposals, DHF votes).
+
+`setup-scripts-test` and `python_api_client_test` BOTH run `scripts/check_api_client_sync.sh`, which performs a 4-step check (fixture sync → client exists → client content diff → pytest endpoint assertions). If any SQL endpoint was modified without regenerating the client, both jobs fail hard and block the merge request.
 
 ### Pipeline Requirements
 
@@ -148,6 +197,7 @@ Tests require:
 1. **HAF data**: Synced to 5M blocks (prepared by `prepare_haf_data` job)
 2. **HAFBE schema**: Installed and synced (by `sync` job)
 3. **PostgREST**: Running for API tests
+4. **API client fixtures + generated files**: Must be committed alongside endpoint changes (validated by both `setup-scripts-test` and `python_api_client_test` before any database-dependent steps)
 
 `pattern-test-with-mock-data` additionally requires the mock cache (`sync_with_mock_data` job, sync stage). That job:
 - Checks NFS for a cached `haf_hafbe_mock` image; on miss, falls back to the HAFBE sync cache as base
@@ -163,8 +213,11 @@ find_haf_image → prepare_haf_data → sync              → tests
                                                           ├── pattern-test
                                                           ├── pattern-test-with-mock-data
                                                           ├── performance-test
-                                                          └── setup-scripts-test
+                                                          ├── setup-scripts-test      ← API Client Sync here
+                                                          └── python_api_client_test    ← API Client Sync here
 ```
+
+> Note: The API Client Sync check in `setup-scripts-test` runs BEFORE any database-dependent steps and requires no PostgreSQL. It catches endpoint/client drift as early as possible.
 
 ## Writing New Tests
 

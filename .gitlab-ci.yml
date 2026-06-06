@@ -632,6 +632,7 @@ python_api_client_test:
     artifacts: true
   variables:
     PYPROJECT_DIR: "${CI_PROJECT_DIR}/scripts/python_api_package"
+    API_GEN_DIR: "${CI_PROJECT_DIR}/scripts/api_generation"
     # Job uses artifacts, doesn't need submodules
     GIT_SUBMODULE_STRATEGY: none
   parallel:
@@ -640,7 +641,9 @@ python_api_client_test:
   before_script:
   - !reference [.project_develop_configuration_template, before_script]
   - !reference [.update_deps_for_tests, script]
+  - poetry -C "${API_GEN_DIR}" install
   script:
+  - ${CI_PROJECT_DIR}/scripts/check_api_client_sync.sh
   - poetry run -C "${PYPROJECT_DIR}" pytest "${PYPROJECT_DIR}/tests/test_generated_api_client.py"
   tags:
   - public-runner-docker

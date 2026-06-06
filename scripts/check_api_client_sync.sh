@@ -30,11 +30,11 @@ echo "============================================================"
 echo
 
 echo "--- Step 1/2: generate_and_validate.py check-all ---"
-python3 "${API_GEN_DIR}/generate_and_validate.py" check-all
+poetry -C "${API_GEN_DIR}" run python "${API_GEN_DIR}/generate_and_validate.py" check-all
 echo
 
 echo "--- Step 2/2: python_api_package endpoint_sync tests ---"
-python3 -m pytest "${PYAPI_DIR}/tests/test_endpoint_sync.py" -v
+poetry -C "${PYAPI_DIR}" run pytest "${PYAPI_DIR}/tests/test_endpoint_sync.py" -v
 echo
 
 echo "============================================================"

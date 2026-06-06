@@ -3,6 +3,7 @@ from __future__ import annotations
 import difflib
 import hashlib
 import json
+import re
 import shutil
 import sys
 import tempfile
@@ -25,6 +26,32 @@ PYTHON_API_PACKAGE = PROJECT_ROOT / "scripts" / "python_api_package"
 CLIENT_OUTPUT_DIR = PYTHON_API_PACKAGE / "hiveio_hafbe_api" / "hafbe_api_client"
 FIXED_OPENAPI_JSON = SCRIPTS_DIR / "fixtures" / "openapi_spec.json"
 FIXED_REWRITE_CONF = SCRIPTS_DIR / "fixtures" / "rewrite_rules.conf"
+
+_TIMESTAMP_RE = re.compile(r"^#   timestamp: .*$", re.MULTILINE)
+_GENERATED_IMPORT_RE = re.compile(
+    r"from (?:[a-zA-Z0-9_]+\.)?hafbe_api_client\.(\w+)(.*)"
+)
+
+
+def _normalize_content(content: str) -> str:
+    content = _TIMESTAMP_RE.sub("#   timestamp: <normalized>", content)
+    content = _GENERATED_IMPORT_RE.sub(
+        lambda m: f"from <pkg>.hafbe_api_client.<mod>{m.group(2)}",
+        content,
+    )
+    return content
+
+
+def _file_hash_normalized(path: Path) -> str:
+    raw = path.read_bytes()
+    if path.suffix == ".py":
+        try:
+            text = raw.decode("utf-8")
+            normalized = _normalize_content(text).encode("utf-8")
+            return hashlib.sha256(normalized).hexdigest()
+        except UnicodeDecodeError:
+            pass
+    return hashlib.sha256(raw).hexdigest()
 
 
 @dataclass
@@ -101,9 +128,12 @@ def _list_files(root: Path) -> dict[str, str]:
     if not root.exists():
         return result
     for p in sorted(root.rglob("*")):
-        if p.is_file():
-            rel = str(p.relative_to(root))
-            result[rel] = hashlib.sha256(p.read_bytes()).hexdigest()
+        if not p.is_file():
+            continue
+        rel = str(p.relative_to(root))
+        if "__pycache__" in rel or rel.endswith(".pyc"):
+            continue
+        result[rel] = _file_hash_normalized(p)
     return result
 
 
@@ -129,15 +159,28 @@ def diff_directories(current_dir: Path, generated_dir: Path) -> DiffResult:
 
 
 def generate_client_to_dir(output_dir: Path, swagger_path: Path) -> None:
-    from api_client_generator.rest import generate_api_client_from_swagger
-    from beekeepy.handle.remote import AbstractAsyncApi
+    import subprocess
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    generate_api_client_from_swagger(
-        swagger_path,
-        output_dir,
-        AbstractAsyncApi,
+
+    script = (
+        "import sys;"
+        "from pathlib import Path;"
+        "from api_client_generator.rest import generate_api_client_from_swagger;"
+        "from beekeepy.handle.remote import AbstractAsyncApi;"
+        f"generate_api_client_from_swagger(Path(r'{swagger_path}'), Path(r'{output_dir}'), AbstractAsyncApi)"
     )
+
+    result = subprocess.run(
+        ["poetry", "-C", str(SCRIPTS_DIR), "run", "python", "-c", script],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Client generation failed (exit {result.returncode}):\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
 
 
 def check_client_exists() -> tuple[bool, str]:
