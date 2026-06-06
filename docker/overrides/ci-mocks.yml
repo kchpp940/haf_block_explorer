@@ -6,7 +6,6 @@ services:
     volumes:
       - haf_datadir:/home/hived/datadir
       - haf_shmdir:/home/hived/shm_dir
-      - ./scripts/common-healthcheck-lib.sh:/home/hived/common-healthcheck-lib.sh:ro
       - ./scripts/haf-healthcheck.sh:/home/hived/healthcheck.sh
       - ./blockchain:/home/hived/datadir/blockchain
 

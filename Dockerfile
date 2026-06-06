@@ -67,7 +67,6 @@ EOF
 
 USER hived
 
-COPY --chown=hived:users docker/scripts/common-healthcheck-lib.sh /app/
 COPY --chown=hived:users docker/scripts/block-processing-healthcheck.sh /app/
 
 COPY --chown=hived:users backend /home/hived/haf_block_explorer/backend
