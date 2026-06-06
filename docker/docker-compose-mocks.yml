@@ -1,4 +1,25 @@
 name: 'haf-be-mocks'
+
+x-healthcheck-defaults: &healthcheck-defaults
+  interval: 30s
+  timeout: 10s
+  retries: 3
+  start_period: 60s
+
+x-haf-healthcheck: &haf-healthcheck
+  <<: *healthcheck-defaults
+  interval: 60s
+  timeout: 10s
+  retries: 3
+  start_period: 48h
+
+x-block-processing-healthcheck: &block-processing-healthcheck
+  <<: *healthcheck-defaults
+  interval: 60s
+  timeout: 5s
+  retries: 20
+  start_period: 72h
+
 services:
   haf:
     image: ${HAF_REGISTRY:-registry.gitlab.syncad.com/hive/haf/instance}:${HAF_VERSION:-9ec94375}
@@ -16,15 +37,13 @@ services:
       - haf_datadir:/home/hived/datadir
       - haf_shmdir:/home/hived/shm_dir
       - ./blockchain:/home/hived/datadir/blockchain
+      - ./scripts/common-healthcheck-lib.sh:/home/hived/common-healthcheck-lib.sh:ro
       - ./scripts/haf-healthcheck.sh:/home/hived/healthcheck.sh
     networks:
       haf-network:
     healthcheck:
+      <<: *haf-healthcheck
       test: ["CMD-SHELL","/home/hived/healthcheck.sh"]
-      interval: 60s
-      timeout: 10s
-      retries: 3
-      start_period: 48h
 
   fill-db-with-mock-data:
     image: ${BACKEND_REGISTRY:-registry.gitlab.syncad.com/hive/haf_block_explorer}:${BACKEND_VERSION:-latest}
@@ -51,14 +70,14 @@ services:
     environment:
       POSTGRES_HOST: haf
       POSTGRES_USER: hafbe_owner
+    volumes:
+      - ./scripts/common-healthcheck-lib.sh:/home/hived/haf_block_explorer/common-healthcheck-lib.sh:ro
+      - ./scripts/block-processing-healthcheck.sh:/home/hived/haf_block_explorer/block-processing-healthcheck.sh
     networks:
       haf-network:
     healthcheck:
-      test: ["CMD-SHELL","/app/block-processing-healthcheck.sh"]
-      interval: 60s
-      timeout: 5s
-      retries: 20
-      start_period: 72h
+      <<: *block-processing-healthcheck
+      test: ["CMD-SHELL","/home/hived/haf_block_explorer/block-processing-healthcheck.sh hafbe_app"]
     depends_on:
       fill-db-with-mock-data:
         condition: service_completed_successfully

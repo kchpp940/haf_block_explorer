@@ -18,6 +18,19 @@
 
 name: 'haf-be-test'
 
+x-healthcheck-defaults: &healthcheck-defaults
+  interval: 30s
+  timeout: 10s
+  retries: 3
+  start_period: 60s
+
+x-haf-healthcheck: &haf-healthcheck
+  <<: *healthcheck-defaults
+  interval: 60s
+  timeout: 10s
+  retries: 3
+  start_period: 48h
+
 services:
   haf:
     image: ${HAF_IMAGE_NAME:-registry.gitlab.syncad.com/hive/haf/instance:latest}
@@ -45,11 +58,8 @@ services:
     networks:
       - haf-network-test
     healthcheck:
-      test: ["CMD-SHELL", "psql -U haf_admin -d haf_block_log -c 'SELECT 1' || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 30
-      start_period: 60s
+      <<: *haf-healthcheck
+      test: ["CMD-SHELL","/home/hived/healthcheck.sh"]
     ports:
       - "5432:5432"
 
