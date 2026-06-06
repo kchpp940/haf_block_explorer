@@ -5,14 +5,28 @@ cd /home/hived/haf_block_explorer/scripts
 validate_config() {
     local errors=0
 
-    POSTGRES_HOST="${POSTGRES_HOST-localhost}"
-    POSTGRES_PORT="${POSTGRES_PORT-5432}"
-    POSTGRES_USER="${POSTGRES_USER-hafbe_owner}"
+    if [ -n "${POSTGRES_ACCESS+set}" ]; then
+        if [ -z "$POSTGRES_ACCESS" ]; then
+            echo "[ENTRYPOINT ERROR] POSTGRES_ACCESS is set but empty" >&2
+            errors=$((errors + 1))
+        elif ! [[ "$POSTGRES_ACCESS" =~ ^postgresql://([^:@]+)(:[^@]*)?@([^:/]+):([0-9]+)/([^/?]+)(\?.*)?$ ]]; then
+            echo "[ENTRYPOINT ERROR] POSTGRES_ACCESS format invalid, expected postgresql://user[:pass]@host:port/dbname[?options], got: '$POSTGRES_ACCESS'" >&2
+            errors=$((errors + 1))
+        else
+            POSTGRES_USER="${BASH_REMATCH[1]}"
+            POSTGRES_HOST="${BASH_REMATCH[3]}"
+            POSTGRES_PORT="${BASH_REMATCH[4]}"
+        fi
+    else
+        POSTGRES_HOST="${POSTGRES_HOST-localhost}"
+        POSTGRES_PORT="${POSTGRES_PORT-5432}"
+        POSTGRES_USER="${POSTGRES_USER-hafbe_owner}"
+        POSTGRES_ACCESS="postgresql://${POSTGRES_USER}@${POSTGRES_HOST}:${POSTGRES_PORT}/haf_block_log?application_name=block_explorer_entrypoint"
+    fi
+
     BTRACKER_SCHEMA="${BTRACKER_SCHEMA-hafbe_bal}"
     POSTGREST_PORT="${POSTGREST_PORT-3000}"
     POSTGREST_ADMIN_PORT="${POSTGREST_ADMIN_PORT-3001}"
-
-    POSTGRES_ACCESS="postgresql://${POSTGRES_USER}@${POSTGRES_HOST}:${POSTGRES_PORT}/haf_block_log?application_name=block_explorer_entrypoint"
 
     if [ -z "${POSTGRES_HOST+set}" ]; then
         :
@@ -62,11 +76,6 @@ validate_config() {
     elif ! [[ "$BTRACKER_SCHEMA" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
         echo "[ENTRYPOINT ERROR] BTRACKER_SCHEMA contains invalid characters: '$BTRACKER_SCHEMA'" >&2
         echo "[ENTRYPOINT ERROR] Schema name must start with a letter or underscore and contain only alphanumeric characters and underscores" >&2
-        errors=$((errors + 1))
-    fi
-
-    if [ -n "${POSTGRES_ACCESS-}" ] && ! [[ "$POSTGRES_ACCESS" =~ ^postgresql://[^@]+@[^:]+:[0-9]+/[^?]+(\?.*)?$ ]]; then
-        echo "[ENTRYPOINT ERROR] POSTGRES_ACCESS format invalid: '$POSTGRES_ACCESS'" >&2
         errors=$((errors + 1))
     fi
 
