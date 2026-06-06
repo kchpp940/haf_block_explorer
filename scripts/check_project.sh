@@ -25,15 +25,23 @@ Unified project quality checks replicating CI lint and validation gates.
 Runs locally what CI runs: SQL lint, shell lint, OpenAPI rewrite validation,
 and Python package tests.
 
+By default the script runs in STRICT mode: if a required tool is missing,
+that check FAILS (mirroring CI). Use --allow-missing-tools to gracefully skip
+checks whose tools are not installed.
+
 OPTIONS:
-  --sql         Run only SQLFluff SQL code style checks
-  --shell       Run only ShellCheck shell script lint
-  --openapi     Run only OpenAPI rewrite validation tests
-  --python      Run only Python package tests
-  --all         Run all checks (default behavior)
-  --fix         Attempt auto-fix (currently: SQLFluff)
-  --verbose     Show detailed output for each check
-  --help, -h    Show this help message and exit
+  --sql                  Run only SQLFluff SQL code style checks
+  --shell                Run only ShellCheck shell script lint
+  --openapi              Run only OpenAPI rewrite validation tests
+  --python               Run only Python package tests
+  --all                  Run all checks (default behavior)
+  --fix                  Attempt auto-fix (currently: SQLFluff)
+  --verbose              Show detailed output for each check
+  --allow-missing-tools  Skip (instead of failing) checks whose required tools
+                         are not installed locally
+  --install-deps         Run ./scripts/setup_dependencies.sh --install-lint-tools
+                         to install all tools required by this script, then exit
+  --help, -h             Show this help message and exit
 HELP_EOF
 }
 
@@ -72,12 +80,38 @@ check_python_module() {
     python3 -c "import $1" >/dev/null 2>&1
 }
 
+handle_missing_tool() {
+    local tool_name="$1"
+    local install_hint="$2"
+
+    if [ "${ALLOW_MISSING_TOOLS}" = "true" ]; then
+        print_skip "${tool_name} not installed - skipping"
+        if [ -n "${install_hint}" ]; then
+            printf "  install via: %s\n" "${install_hint}"
+            printf "  or run: %s\n" "./scripts/check_project.sh --install-deps"
+        fi
+        return 0
+    else
+        print_fail "${tool_name} not installed (use --allow-missing-tools to skip)"
+        if [ -n "${install_hint}" ]; then
+            printf "  install via: %s\n" "${install_hint}"
+            printf "  or run: %s\n" "./scripts/check_project.sh --install-deps"
+        fi
+        return 1
+    fi
+}
+
+install_dependencies() {
+    print_header "Installing lint and test dependencies"
+    printf "Running: ./scripts/setup_dependencies.sh --install-lint-tools\n\n"
+    exec "${SCRIPT_DIR}/setup_dependencies.sh" --install-lint-tools
+}
+
 run_sqlfluff() {
     print_header "SQLFluff - SQL Code Style"
 
     if ! command_exists sqlfluff; then
-        print_skip "sqlfluff not installed - skipping SQL lint"
-        printf "  install via: pip install sqlfluff\n"
+        handle_missing_tool "sqlfluff" "pip install sqlfluff" || return 0
         return 0
     fi
 
@@ -119,8 +153,7 @@ run_shellcheck() {
     print_header "ShellCheck - Shell Script Lint"
 
     if ! command_exists shellcheck; then
-        print_skip "shellcheck not installed - skipping shell lint"
-        printf "  install via: brew install shellcheck (macOS) or apt-get install shellcheck (Debian/Ubuntu)\n"
+        handle_missing_tool "shellcheck" "brew install shellcheck (macOS) / apt-get install shellcheck (Debian/Ubuntu)" || return 0
         return 0
     fi
 
@@ -170,13 +203,12 @@ run_openapi_validation() {
     print_header "OpenAPI Rewrite Validation"
 
     if ! command_exists python3; then
-        print_skip "python3 not installed - skipping OpenAPI validation"
+        handle_missing_tool "python3" "install Python 3.12+" || return 0
         return 0
     fi
 
     if ! check_python_module pytest; then
-        print_skip "pytest not installed - skipping OpenAPI validation"
-        printf "  install via: pip install pytest poetry\n"
+        handle_missing_tool "pytest" "pip install pytest poetry" || return 0
         return 0
     fi
 
@@ -200,9 +232,10 @@ run_openapi_validation() {
     (
         cd "${api_gen_dir}"
         if command_exists poetry && [ -f "pyproject.toml" ]; then
-            printf "  using poetry environment\n"
+            printf "  using poetry environment (same as CI)\n"
             poetry run pytest ${pytest_args} tests/
         else
+            handle_missing_tool "poetry" "pip install poetry" || return 1
             printf "  using system python\n"
             python3 -m pytest ${pytest_args} tests/
         fi
@@ -225,7 +258,7 @@ run_python_tests() {
     print_header "Python Package Tests"
 
     if ! command_exists python3; then
-        print_skip "python3 not installed - skipping Python tests"
+        handle_missing_tool "python3" "install Python 3.12+" || return 0
         return 0
     fi
 
@@ -249,9 +282,10 @@ run_python_tests() {
     (
         cd "${pkg_dir}"
         if command_exists poetry && [ -f "pyproject.toml" ]; then
-            printf "  using poetry environment\n"
+            printf "  using poetry environment (same as CI)\n"
             poetry run pytest ${pytest_args} tests/test_package_import.py tests/test_generated_api_client.py
         else
+            handle_missing_tool "poetry" "pip install poetry" || return 1
             printf "  using system python\n"
             python3 -m pytest ${pytest_args} tests/test_package_import.py tests/test_generated_api_client.py
         fi
@@ -275,6 +309,12 @@ print_summary() {
     printf "${CYAN}========================================${NC}\n"
     printf "${CYAN}  CHECK SUMMARY${NC}\n"
     printf "${CYAN}========================================${NC}\n"
+    printf "  Mode:   "
+    if [ "${ALLOW_MISSING_TOOLS}" = "true" ]; then
+        printf "${YELLOW}permissive (missing tools skip)${NC}\n"
+    else
+        printf "${GREEN}strict (same as CI)${NC}\n"
+    fi
     printf "  Total:  %s\n" "${TOTAL_COUNT}"
     printf "  ${GREEN}Passed: %s${NC}\n" "${PASS_COUNT}"
     if [ "${FAIL_COUNT}" -gt 0 ]; then
@@ -289,10 +329,16 @@ print_summary() {
         printf "${RED}Some checks FAILED:${NC}\n"
         printf "%s\n" "${FAILED_CHECKS}"
         printf "\n"
-        printf "See above for details.\n"
+        printf "To install missing tools: %s\n" "./scripts/check_project.sh --install-deps"
+        printf "To allow skipping missing tools: %s\n" "./scripts/check_project.sh --allow-missing-tools"
         exit 1
     else
-        printf "${GREEN}All checks passed or skipped.${NC}\n"
+        if [ "${SKIP_COUNT}" -gt 0 ] && [ "${ALLOW_MISSING_TOOLS}" = "true" ]; then
+            printf "${YELLOW}All remaining checks passed. %d check(s) skipped due to missing tools.${NC}\n" "${SKIP_COUNT}"
+            printf "Install missing tools with: %s\n" "./scripts/check_project.sh --install-deps"
+        else
+            printf "${GREEN}All checks passed.${NC}\n"
+        fi
     fi
 }
 
@@ -303,6 +349,7 @@ RUN_PYTHON=false
 RUN_ALL=true
 FIX_MODE=false
 VERBOSE=false
+ALLOW_MISSING_TOOLS=false
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -331,6 +378,12 @@ while [ $# -gt 0 ]; do
         --verbose)
             VERBOSE=true
             ;;
+        --allow-missing-tools)
+            ALLOW_MISSING_TOOLS=true
+            ;;
+        --install-deps)
+            install_dependencies
+            ;;
         --help|-h|-\?)
             print_help
             exit 0
@@ -353,6 +406,11 @@ done
 
 printf "${CYAN}HAF Block Explorer - Project Quality Checks${NC}\n"
 printf "Project root: %s\n" "${PROJECT_ROOT}"
+if [ "${ALLOW_MISSING_TOOLS}" = "true" ]; then
+    printf "Mode:         %s\n" "permissive (missing tools skip)"
+else
+    printf "Mode:         %s\n" "strict (missing tools fail — same as CI)"
+fi
 printf "\n"
 
 if [ "${RUN_ALL}" = "true" ] || [ "${RUN_SQL}" = "true" ]; then

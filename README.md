@@ -680,10 +680,15 @@ Contributions are welcome! Please follow these guidelines:
 ### Pre-Submit Quality Checks (Local CI Gate)
 
 Before submitting a merge request, run the unified project checker to replicate
-the lint and validation gates that CI runs:
+the lint and validation gates that CI runs. The script runs in **strict mode by
+default** (same as CI): any missing required tool causes that check to FAIL.
 
 ```bash
-# Run all checks (SQL lint, shell lint, OpenAPI validation, Python tests)
+# One-time setup — install all lint and test dependencies locally.
+# This is the same set of tools CI uses.
+./scripts/check_project.sh --install-deps
+
+# Run all checks (strict mode — missing tools fail, just like CI)
 ./scripts/check_project.sh
 
 # Run individual checks
@@ -697,6 +702,10 @@ the lint and validation gates that CI runs:
 
 # Verbose output for debugging failures
 ./scripts/check_project.sh --verbose
+
+# Permissive mode — skip instead of fail when a tool is not installed
+# (useful for quick local runs without the full toolchain)
+./scripts/check_project.sh --allow-missing-tools
 ```
 
 **What it checks** (mirrors CI lint/test gates):
@@ -708,22 +717,24 @@ the lint and validation gates that CI runs:
 | OpenAPI rewrite | pytest (`scripts/api_generation/tests/`) | Rewrite rules, endpoint extraction, spec consistency |
 | Python package tests | pytest (`scripts/python_api_package/tests/`) | Package import, generated client, endpoint sync |
 
-> **Tip**: Any of these failing locally will also fail in CI. Run `./scripts/check_project.sh` before pushing to save a pipeline round-trip.
+> **Tip**: Any of these failing locally will also fail in CI. Run `./scripts/check_project.sh`
+> before pushing to save a pipeline round-trip.
 
-Required tooling (optional — checks gracefully skip if missing):
+**Installing dependencies** (same set CI uses):
 
 ```bash
-# SQL lint
-pip install sqlfluff
+# Option A — via check_project.sh (recommended, single command)
+./scripts/check_project.sh --install-deps
 
-# Shell lint (via your package manager)
-brew install shellcheck         # macOS
-apt-get install shellcheck      # Debian/Ubuntu
-
-# Python test dependencies
-cd scripts/api_generation && poetry install
-cd scripts/python_api_package && poetry install
+# Option B — via setup_dependencies.sh directly
+./scripts/setup_dependencies.sh --install-lint-tools
 ```
+
+The `--install-lint-tools` target installs (in a cross-platform way, macOS and Linux):
+- `shellcheck` (system package via brew/apt)
+- `sqlfluff` (pip, user-level)
+- `poetry` (pip, user-level)
+- Poetry environments for `scripts/api_generation/` and `scripts/python_api_package/`
 
 ### Development Workflow
 

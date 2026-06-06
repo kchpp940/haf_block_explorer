@@ -82,15 +82,23 @@ These scripts help with common development and debugging tasks. **Use them autom
 
 **Location**: `scripts/check_project.sh`
 
+**Companion**: `scripts/setup_dependencies.sh --install-lint-tools` (installs the full toolchain)
+
 **Use when**:
 - User wants to run all CI lint/validation gates locally before submitting
 - User asks "how do I check my code like CI does?"
 - Debugging lint/style failures that would fail CI
 - Before a merge request, to verify all static checks pass
+- User needs to install the exact set of lint/test tools CI uses
 
 **Usage**:
 ```bash
-# Run all checks (default)
+# One-time: install all required tools (shellcheck, sqlfluff, poetry, poetry envs)
+# This is the same toolchain CI uses.
+./scripts/check_project.sh --install-deps
+
+# Run all checks — STRICT mode by default (mirrors CI):
+# missing tools cause that check to FAIL with a non-zero exit code.
 ./scripts/check_project.sh
 
 # Run individual checks
@@ -104,25 +112,39 @@ These scripts help with common development and debugging tasks. **Use them autom
 
 # Verbose output for debugging
 ./scripts/check_project.sh --verbose
+
+# Permissive mode — skip (instead of fail) checks whose tools are missing locally
+./scripts/check_project.sh --allow-missing-tools
 ```
 
 **What it does** (mirrors the CI lint/test stage):
 1. **SQLFluff** — Lints all `.sql` files against the project style (max 170 lines, postgres dialect, naming/casing conventions per `.sqlfluff`
 2. **ShellCheck** — Lints all `.sh` scripts for syntax errors and best-practice violations (excludes the same SC codes CI uses)
-3. **OpenAPI rewrite validation** — Runs `pytest scripts/api_generation/tests/` to verify rewrite rules, endpoint extraction, and spec fixtures are in sync
-4. **Python package tests** — Runs `pytest scripts/python_api_package/tests/` to verify the generated API client, package import, and endpoint sync
+3. **OpenAPI rewrite validation** — Runs `pytest scripts/api_generation/tests/` to verify rewrite rules, endpoint extraction, and spec fixtures are in sync. Uses `poetry run pytest` (same as CI) when poetry is available.
+4. **Python package tests** — Runs `pytest scripts/python_api_package/tests/` to verify the generated API client, package import, and endpoint sync. Uses `poetry run pytest` (same as CI) when poetry is available.
+
+**Strict vs. permissive mode**:
+- **Strict (default)**: missing required tool → check FAILS, overall exit code non-zero. This exactly matches CI behavior and is the recommended mode before pushing.
+- **Permissive (`--allow-missing-tools`)**: missing tool → check is SKIPPED with a hint. Useful for quick local smoke-tests without the full toolchain.
 
 **Output**:
 - Color-coded `[PASS]`, `[FAIL]`, `[SKIP]` per check
-- Final summary with pass/fail/skip counts
+- Header shows which mode is active: `strict (same as CI)` or `permissive (missing tools skip)`
+- Final summary with pass/fail/skip counts and mode
+- In strict mode, missing-tool FAILs include a direct hint: `./scripts/check_project.sh --install-deps` and `./scripts/check_project.sh --allow-missing-tools`
 - Non-zero exit code if any check fails (same as CI)
-- Missing tools are gracefully skipped with install hints
 
-**Requirements**:
-- `sqlfluff` (pip installable, optional)
-- `shellcheck` (system package, optional)
-- `python3` + `pytest` + `poetry` (optional, for OpenAPI/Python checks)
-- Checks that cannot run are **skipped**, not failed — so the script always runs end-to-end.
+**Requirements / how to install**:
+```bash
+# One command, same toolchain CI uses:
+./scripts/check_project.sh --install-deps
+#   (equivalent to: ./scripts/setup_dependencies.sh --install-lint-tools)
+```
+This installs (cross-platform: macOS brew / Linux apt + pip):
+- `shellcheck`
+- `sqlfluff`
+- `poetry`
+- Poetry environments for `scripts/api_generation/` and `scripts/python_api_package/` (includes pytest and all test deps)
 
 ---
 
@@ -178,6 +200,8 @@ These scripts help with common development and debugging tasks. **Use them autom
 | "Check my SQL style before pushing" | `check_project.sh --sql` |
 | "Check shell scripts for errors" | `check_project.sh --shell` |
 | "Validate OpenAPI rewrite rules" | `check_project.sh --openapi` |
+| "Install lint tools / set up the CI toolchain locally" | `check_project.sh --install-deps` (or `setup_dependencies.sh --install-lint-tools`) |
+| "Quick local check, I don't have all tools installed" | `check_project.sh --allow-missing-tools` |
 
 ## Error Patterns by Job Type
 
