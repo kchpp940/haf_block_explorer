@@ -32,11 +32,13 @@ services:
     entrypoint:
       - /bin/bash
       - -lc
-      - ./tests/mocks/install_mock_data.sh --host=haf --port=5432
+      - python3 ./scripts/test_bootstrap.py mock-install --host=haf --port=5432
     environment:
       POSTGRES_HOST: haf
     volumes:
       - ../tests/mocks:/home/hived/haf_block_explorer/tests/mocks:ro
+      - ../tests/regression:/home/hived/haf_block_explorer/tests/regression:ro
+      - ../scripts:/home/hived/haf_block_explorer/scripts:ro
     networks:
       haf-network:
     depends_on:

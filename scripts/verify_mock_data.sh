@@ -1,35 +1,35 @@
 #!/usr/bin/env bash
 # =============================================================================
-# HAFBE Proposal Mock Data Verification
+# HAFBE Proposal Mock Data Verification  (thin wrapper around test_bootstrap.py)
 # =============================================================================
 #
+# NOTE: The actual implementation now lives in scripts/test_bootstrap.py.
+#       This script is kept for backward compatibility with CI mock jobs and
+#       developer muscle memory. It simply forwards to:
+#
+#           scripts/test_bootstrap.py mock-verify
+#
+# For the full list of subcommands (check, mock-*, regression-*) and options
+# run:  scripts/test_bootstrap.py --help
+#
+# Original purpose preserved below for reference.
+# -----------------------------------------------------------------------------
 # Run AFTER:
 #   1. ./tests/mocks/install_mock_data.sh   (loads fixtures + rewinds contexts)
 #   2. ./scripts/process_blocks.sh ...      (processes the mock range)
 #
 # Refreshes the two LIVE-mode caches (witness_votes_cache and
-# proposal_vote_stats_cache) — they normally refresh per-block while LIVE,
-# but if processing stopped mid-batch we force a refresh here — then runs
-# tests/mocks/sql/verify.sql which prints a PASS/FAIL table and RAISEs on
-# any failure (psql -v ON_ERROR_STOP=on propagates non-zero exit so CI
-# fails the job).
-#
-# Usage:
-#   ./verify_mock_data.sh [OPTIONS]
-#
-# Options:
-#   --host=HOSTNAME    PostgreSQL hostname  (default: localhost)
-#   --port=PORT        PostgreSQL port      (default: 5432)
-#   --user=USERNAME    PostgreSQL user      (default: haf_admin)
-#   --url=URL          Full PostgreSQL URL  (overrides above)
-#   --help, -h         This help
+# proposal_vote_stats_cache) then runs the PASS/FAIL assertion table.
 # =============================================================================
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-HAFBE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-MOCKS_DIR="$HAFBE_DIR/tests/mocks"
+BOOTSTRAP="$SCRIPT_DIR/test_bootstrap.py"
+
+if [ ! -x "$BOOTSTRAP" ]; then
+    chmod +x "$BOOTSTRAP" 2>/dev/null || true
+fi
 
 POSTGRES_USER="${POSTGRES_USER:-haf_admin}"
 POSTGRES_HOST="${POSTGRES_HOST:-localhost}"
@@ -37,54 +37,37 @@ POSTGRES_PORT="${POSTGRES_PORT:-5432}"
 POSTGRES_URL="${POSTGRES_URL:-}"
 
 print_help() {
-  sed -n '2,/^# =\+$/p' "$0" | sed 's/^# \?//'
+    sed -n '2,/^# =\+$/p' "$0" | sed 's/^# \?//'
+    echo
+    echo "See also: $BOOTSTRAP --help"
 }
 
 while [ $# -gt 0 ]; do
-  case "$1" in
-    --host=*)    POSTGRES_HOST="${1#*=}" ;;
-    --port=*)    POSTGRES_PORT="${1#*=}" ;;
-    --user=*)    POSTGRES_USER="${1#*=}" ;;
-    --url=*)     POSTGRES_URL="${1#*=}" ;;
-    --help|-h)   print_help; exit 0 ;;
-    *) echo "ERROR: unknown arg: $1"; exit 1 ;;
-  esac
-  shift
+    case "$1" in
+        --host=*)    POSTGRES_HOST="${1#*=}" ;;
+        --port=*)    POSTGRES_PORT="${1#*=}" ;;
+        --user=*)    POSTGRES_USER="${1#*=}" ;;
+        --url=*)     POSTGRES_URL="${1#*=}" ;;
+        --help|-h)   print_help; exit 0 ;;
+        *) echo "ERROR: unknown arg: $1"; exit 2 ;;
+    esac
+    shift
 done
-
-POSTGRES_ACCESS="${POSTGRES_URL:-postgresql://$POSTGRES_USER@$POSTGRES_HOST:$POSTGRES_PORT/haf_block_log?application_name=hafbe_mock_verify}"
-BTRACKER_SCHEMA="${BTRACKER_SCHEMA:-hafbe_bal}"
-
-# btracker_backend.nai_vests() references `asset_table` unqualified — that
-# table lives in the btracker schema. Mirrors scripts/install_app.sh.
-export PGOPTIONS="-c search_path=${BTRACKER_SCHEMA},public"
-
-run_psql() { psql "$POSTGRES_ACCESS" -v ON_ERROR_STOP=on "$@"; }
 
 echo "=============================================="
 echo "HAFBE proposal mock verification"
+echo "  (delegating to scripts/test_bootstrap.py)"
 echo "  Host: $POSTGRES_HOST:$POSTGRES_PORT  User: $POSTGRES_USER"
 echo "=============================================="
+echo
 
-echo "Step 1: Refreshing vote caches (witness first, then proposal)..."
-run_psql -c "SELECT hafbe_app.process_witness_votes_cache()"
+BOOTSTRAP_ARGS=(mock-verify
+    --host="$POSTGRES_HOST"
+    --port="$POSTGRES_PORT"
+    --user="$POSTGRES_USER"
+)
+if [ -n "$POSTGRES_URL" ]; then
+    BOOTSTRAP_ARGS+=(--url="$POSTGRES_URL")
+fi
 
-# Seed a deterministic vest amount for initminer so the total_votes assertion
-# in verify.sql is independent of mainnet btracker data. Runs AFTER
-# process_witness_votes_cache() (which rebuilds account_vest_stats_cache from
-# btracker) so this value survives into process_proposal_vote_stats_cache().
-run_psql -c "
-  INSERT INTO hafbe_app.account_vest_stats_cache (account_id, vests, account_vests, proxied_vests)
-  SELECT av.id, 5000000, 5000000, 0
-  FROM hive.accounts_view av
-  WHERE av.name = 'initminer'
-  ON CONFLICT (account_id) DO UPDATE
-    SET vests         = 5000000,
-        account_vests = 5000000,
-        proxied_vests = 0;
-"
-
-run_psql -c "SELECT hafbe_app.process_proposal_vote_stats_cache()"
-
-echo "Step 2: Running verify.sql..."
-run_psql -f "$MOCKS_DIR/sql/verify.sql"
+exec python3 "$BOOTSTRAP" "${BOOTSTRAP_ARGS[@]}"
