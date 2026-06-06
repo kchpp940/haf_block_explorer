@@ -38,6 +38,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
@@ -773,6 +774,41 @@ def cmd_mock_verify(args: argparse.Namespace) -> int:
 # Subcommand: mock-full
 # ---------------------------------------------------------------------------
 
+def _wait_for_indexes(db: DBConfig, timeout_minutes: int = 60,
+                      poll_interval_sec: int = 20) -> None:
+    """Poll ``hive.check_if_registered_indexes_created()`` until it returns true.
+
+    Mirrors the same wait used by ``wait-for-haf-be-startup.sh``.  Exits 3 on
+    timeout so CI can tell apart "index creation slow" from "verification
+    failed".
+    """
+    start_time = time.time()
+    end_time = start_time + timeout_minutes * 60
+    iteration = 0
+    while True:
+        rows = run_sql(db,
+            "SELECT hive.check_if_registered_indexes_created('hafbe_app')::INT")
+        if rows and rows[0][0] == 1:
+            return
+        if time.time() >= end_time:
+            sys.stderr.write(f"{C_RED}{C_BOLD}  Timeout waiting for registered "
+                             f"indexes ({timeout_minutes} min){C_RESET}\n")
+            sys.stderr.write("  Diagnostics:\n")
+            ctx = run_sql(db,
+                "SELECT name, current_block_num, irreversible_block "
+                "FROM hafd.contexts WHERE name IN ('hafbe_app', 'hafbe_bal')")
+            for name, blk, irb in ctx:
+                sys.stderr.write(f"    context {name}: block={blk} irb={irb}\n")
+            sys.exit(3)
+        iteration += 1
+        if iteration % 3 == 0:
+            elapsed = int((time.time() - start_time) / 60)
+            sys.stderr.write(f"  Waiting for registered indexes... ({elapsed}m elapsed)\n")
+        else:
+            sys.stderr.write("  Waiting for registered indexes...\n")
+        time.sleep(poll_interval_sec)
+
+
 def cmd_mock_full(args: argparse.Namespace) -> int:
     db = db_from_args(args)
     _preflight_db(db, getattr(args, "skip_if_no_db", False))
@@ -781,7 +817,7 @@ def cmd_mock_full(args: argparse.Namespace) -> int:
     if rc != 0:
         return rc
 
-    # Run process_blocks.sh
+    # Step 2: Run process_blocks.sh (calls hafbe_app.main via psql)
     min_b, max_b = _get_expected_mock_block_range()
     _print_header(f"Processing mock blocks {min_b}..{max_b}")
     process_script = SCRIPT_DIR / "process_blocks.sh"
@@ -801,6 +837,35 @@ def cmd_mock_full(args: argparse.Namespace) -> int:
         )
         return result.returncode
 
+    # Step 3: Create HAFBE + HAF indexes (mirrors wait-for-haf-be-startup.sh)
+    _print_header("Creating HAFBE application indexes")
+    try:
+        run_sql(db, "SELECT hafbe_app.create_hafbe_indexes()")
+    except _PSYCOPG2_ERROR as exc:
+        sys.stderr.write(f"{C_RED}{C_BOLD}  ERROR creating hafbe indexes: {exc}{C_RESET}\n")
+        return 3
+    _print_status("hafbe_app indexes", "PASS", "created")
+
+    _print_header("Restoring registered HAF table indexes")
+    try:
+        run_sql(db, "SELECT hive.app_restore_indexes('hafbe_app')")
+    except _PSYCOPG2_ERROR as exc:
+        sys.stderr.write(f"{C_RED}{C_BOLD}  ERROR restoring HAF indexes: {exc}{C_RESET}\n")
+        return 3
+    _print_status("HAF registered indexes", "IN_PROGRESS", "restored, waiting for build")
+    _wait_for_indexes(db)
+    _print_status("HAF registered indexes", "PASS", "all built")
+
+    # Step 4: CHECKPOINT (prevents overloaded checkpointer on shutdown)
+    _print_header("Flushing WAL (CHECKPOINT)")
+    try:
+        run_sql(db, "CHECKPOINT")
+    except _PSYCOPG2_ERROR as exc:
+        sys.stderr.write(f"{C_YELLOW}  WARNING: CHECKPOINT failed: {exc}{C_RESET}\n")
+    else:
+        _print_status("CHECKPOINT", "PASS", "complete")
+
+    # Step 5: End-to-end verification
     return cmd_mock_verify(args)
 
 
