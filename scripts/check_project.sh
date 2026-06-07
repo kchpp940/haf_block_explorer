@@ -327,11 +327,11 @@ run_python_tests() {
         cd "${pkg_dir}"
         if command_exists poetry && [ -f "pyproject.toml" ]; then
             printf "  using poetry environment (same as CI)\n"
-            poetry run pytest ${pytest_args} tests/test_package_import.py tests/test_generated_api_client.py
+            poetry run pytest ${pytest_args} tests/test_package_import.py tests/test_endpoint_sync.py
         else
             handle_missing_tool "poetry" "pip install poetry" || return 1
             printf "  using system python\n"
-            python3 -m pytest ${pytest_args} tests/test_package_import.py tests/test_generated_api_client.py
+            python3 -m pytest ${pytest_args} tests/test_package_import.py tests/test_endpoint_sync.py
         fi
     ) > "${output_file}" 2>&1 || exit_code=$?
 
