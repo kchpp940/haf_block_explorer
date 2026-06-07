@@ -1,166 +1,154 @@
 from __future__ import annotations
 
 import inspect
-import json
+import sys
 from pathlib import Path
-from typing import Any
 
 import pytest
 
-PROJECT_ROOT: Path = Path(__file__).resolve().parents[3]
-FIXTURE_PATH: Path = PROJECT_ROOT / "scripts" / "api_generation" / "fixtures" / "openapi_spec.json"
-CLIENT_DIR: Path = (
-    PROJECT_ROOT / "scripts" / "python_api_package" / "hiveio_hafbe_api" / "hafbe_api_client"
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+API_GEN_DIR = PROJECT_ROOT / "scripts" / "api_generation"
+if str(API_GEN_DIR) not in sys.path:
+    sys.path.insert(0, str(API_GEN_DIR))
+
+from generate_and_validate import (
+    _collect_expected_endpoints,
+    _param_name_to_python,
+    validate_client_file,
 )
-
-OPERATION_ID_PREFIX: str = "hafbe_endpoints.get_"
-
-
-def _load_openapi_fixture() -> dict[str, Any]:
-    assert FIXTURE_PATH.exists(), f"OpenAPI fixture file not found at: {FIXTURE_PATH}"
-    with FIXTURE_PATH.open(encoding="utf-8") as f:
-        return json.load(f)
+from openapi_extractor import load_openapi_spec
 
 
-def _collect_operations(spec: dict[str, Any]) -> list[tuple[str, str, str, list[str], list[str]]]:
-    operations: list[tuple[str, str, str, list[str], list[str]]] = []
-    for path, path_item in spec.get("paths", {}).items():
-        for method, operation in path_item.items():
-            if method.lower() not in {"get", "post", "put", "delete", "patch"}:
-                continue
-            operation_id: str = operation.get("operationId", "")
-            params: list[str] = [p.get("name", "") for p in operation.get("parameters", [])]
-            responses: list[str] = list(operation.get("responses", {}).keys())
-            operations.append((method.upper(), path, operation_id, params, responses))
-    return operations
+def _load_openapi_fixture() -> dict:
+    fixture = (
+        PROJECT_ROOT
+        / "scripts"
+        / "api_generation"
+        / "fixtures"
+        / "openapi_spec.json"
+    )
+    if not fixture.exists():
+        pytest.fail(f"OpenAPI fixture not found: {fixture}")
+    return load_openapi_spec(fixture)
 
 
-def _operation_id_to_method_name(operation_id: str) -> str:
-    if not operation_id.startswith(OPERATION_ID_PREFIX):
-        pytest.fail(f"Unexpected operationId format: {operation_id}")
-    suffix: str = operation_id[len(OPERATION_ID_PREFIX) :]
-    return suffix
-
-
-def _path_to_method_name(path: str) -> str:
-    segments: list[str] = [
-        s.replace("-", "_") for s in path.strip("/").split("/") if not s.startswith("{")
-    ]
-    return "_".join(segments)
-
-
-def _get_client_public_methods() -> set[str]:
-    from hiveio_hafbe_api.hafbe_api_client.hafbe_api_client import HafbeApi
-    from beekeepy._apis.abc.api import AbstractAsyncApi
-
-    base_methods: set[str] = set(dir(AbstractAsyncApi))
-    all_attrs: set[str] = set(dir(HafbeApi))
-    return {m for m in (all_attrs - base_methods) if not m.startswith("_")}
+def _get_client_file() -> Path:
+    return (
+        PROJECT_ROOT
+        / "scripts"
+        / "python_api_package"
+        / "hiveio_hafbe_api"
+        / "hafbe_api_client"
+        / "hafbe_api_client.py"
+    )
 
 
 def test_client_directory_exists() -> None:
-    assert CLIENT_DIR.exists(), (
-        f"Client directory does not exist at: {CLIENT_DIR}"
-    )
-    assert CLIENT_DIR.is_dir(), (
-        f"Client path is not a directory: {CLIENT_DIR}"
-    )
-    py_files: list[Path] = list(CLIENT_DIR.glob("*.py"))
-    assert py_files, (
-        f"No .py files found in client directory: {CLIENT_DIR}"
-    )
+    client_dir = _get_client_file().parent
+    if not client_dir.is_dir():
+        pytest.fail(
+            f"Generated client directory missing: {client_dir}\n"
+            "Run: cd scripts/api_generation && poetry run python generate_and_validate.py sync-client"
+        )
+    py_files = list(client_dir.glob("*.py"))
+    if not py_files:
+        pytest.fail(f"No .py files in client directory: {client_dir}")
 
 
 def test_client_class_importable() -> None:
     try:
-        from hiveio_hafbe_api.hafbe_api_client.hafbe_api_client import HafbeApi  # noqa: F401
-    except (ImportError, ModuleNotFoundError) as exc:
-        pytest.fail(f"Failed to import HafbeApi class: {exc}")
-
-    from hiveio_hafbe_api.hafbe_api_client.hafbe_api_client import HafbeApi
-
-    assert inspect.isclass(HafbeApi), "HafbeApi is not a class"
+        from hiveio_hafbe_api.hafbe_api_client.hafbe_api_client import HafbeApi
+    except Exception as exc:
+        pytest.fail(f"Cannot import HafbeApi from generated client: {exc}")
+    assert inspect.isclass(HafbeApi), "HafbeApi must be a class"
 
 
 def test_endpoint_count_matches_fixture() -> None:
-    spec: dict[str, Any] = _load_openapi_fixture()
-    operations: list[tuple[str, str, str, list[str], list[str]]] = _collect_operations(spec)
-    assert operations, "No operations found in OpenAPI fixture"
+    from hiveio_hafbe_api.hafbe_api_client.hafbe_api_client import HafbeApi
 
-    fixture_method_names: set[str] = {
-        _path_to_method_name(path) for _, path, _, _, _ in operations
+    spec = _load_openapi_fixture()
+    expected = _collect_expected_endpoints(spec)
+    expected_names = {ep["method_name"] for ep in expected if ep["method_name"]}
+
+    public_methods = {
+        name
+        for name, _ in inspect.getmembers(HafbeApi, predicate=inspect.iscoroutinefunction)
+        if not name.startswith("_")
     }
-    client_methods: set[str] = _get_client_public_methods()
-    assert client_methods, "No public methods found on HafbeApi class"
 
-    assert len(client_methods) >= len(fixture_method_names), (
-        f"Client public method count ({len(client_methods)}) should be >= "
-        f"unique fixture method count ({len(fixture_method_names)}). "
-        f"Fixture methods: {sorted(fixture_method_names)}. "
-        f"Client methods: {sorted(client_methods)}"
-    )
+    missing = expected_names - public_methods
+    if missing:
+        pytest.fail(
+            f"HafbeApi missing {len(missing)} methods defined in OpenAPI fixture: "
+            f"{sorted(missing)}"
+        )
 
 
 def test_key_endpoints_method_signatures() -> None:
     from hiveio_hafbe_api.hafbe_api_client.hafbe_api_client import HafbeApi
 
-    spec: dict[str, Any] = _load_openapi_fixture()
-    operations: list[tuple[str, str, str, list[str], list[str]]] = _collect_operations(spec)
+    spec = _load_openapi_fixture()
+    expected = _collect_expected_endpoints(spec)
 
-    key_paths: list[str] = ["/accounts/{account-name}", "/witnesses/{account-name}", "/proposals"]
+    key_paths = {
+        "/accounts/{account-name}",
+        "/witnesses/{account-name}",
+        "/proposals",
+    }
+    key_endpoints = [ep for ep in expected if ep["path"] in key_paths]
+    assert key_endpoints, f"No key endpoints found in fixture among {key_paths}"
 
-    for key_path in key_paths:
-        matching_ops: list[tuple[str, str, str, list[str], list[str]]] = [
-            op for op in operations if op[1] == key_path
-        ]
-        assert matching_ops, (
-            f"Key path {key_path} not found in OpenAPI fixture operations"
+    for ep in key_endpoints:
+        mname = ep["method_name"]
+        assert hasattr(HafbeApi, mname), (
+            f"Expected method HafbeApi.{mname} for {ep['http_method']} {ep['path']}"
         )
-
-        for method, path, operation_id, params, responses in matching_ops:
-            expected_method_name: str = _path_to_method_name(path)
-            assert hasattr(HafbeApi, expected_method_name), (
-                f"HafbeApi missing method '{expected_method_name}' "
-                f"for path {path} (operationId={operation_id})"
+        method = getattr(HafbeApi, mname)
+        sig = inspect.signature(method)
+        param_names = list(sig.parameters.keys())
+        for p in ep["parameters"]:
+            if not p:
+                continue
+            assert p in param_names, (
+                f"HafbeApi.{mname} missing parameter '{p}' "
+                f"(signature has {param_names}; expected from {ep['http_method']} {ep['path']})"
             )
 
-            method_obj = getattr(HafbeApi, expected_method_name)
-            assert callable(method_obj), (
-                f"HafbeApi.{expected_method_name} is not callable"
-            )
 
-            sig: inspect.Signature = inspect.signature(method_obj)
-            sig_params: list[str] = list(sig.parameters.keys())
+def test_endpoint_responses_and_error_mapping() -> None:
+    spec = _load_openapi_fixture()
+    expected = _collect_expected_endpoints(spec)
 
-            for param_name in params:
-                python_param_name: str = param_name.replace("-", "_")
-                assert python_param_name in sig_params, (
-                    f"Method HafbeApi.{expected_method_name} signature missing "
-                    f"parameter '{python_param_name}' (from OpenAPI param '{param_name}'). "
-                    f"Actual signature params: {sig_params}"
-                )
-
-
-def test_endpoint_responses_map_errors() -> None:
-    from hiveio_hafbe_api.hafbe_api_client.hafbe_api_client import HafbeApi
-
-    assert HafbeApi is not None, "HafbeApi client class could not be imported"
-
-    spec: dict[str, Any] = _load_openapi_fixture()
-    operations: list[tuple[str, str, str, list[str], list[str]]] = _collect_operations(spec)
-
-    for method, path, operation_id, params, responses in operations:
-        assert "200" in responses, (
-            f"Operation {operation_id} ({method} {path}) is missing 200 response in fixture. "
-            f"Found responses: {responses}"
+    no_success_resp = [
+        f"{ep['http_method']} {ep['path']}"
+        for ep in expected
+        if "200" not in ep["responses"] and "default" not in ep["responses"]
+    ]
+    if no_success_resp:
+        pytest.fail(
+            f"{len(no_success_resp)} endpoints have no 200/default response:\n  - "
+            + "\n  - ".join(no_success_resp)
         )
 
-        has_error_responses: bool = any(
-            r.startswith("4") or r.startswith("5") for r in responses
+    error_endpoints = [
+        ep
+        for ep in expected
+        if any(r.startswith(("4", "5")) for r in ep["responses"])
+    ]
+    if not error_endpoints:
+        pytest.fail(
+            "OpenAPI fixture declares zero 4xx/5xx error responses — "
+            "cannot verify error mapping; check fixture integrity"
         )
-        if has_error_responses:
-            expected_method_name: str = _path_to_method_name(path)
-            assert hasattr(HafbeApi, expected_method_name), (
-                f"HafbeApi missing method '{expected_method_name}' for "
-                f"operation {operation_id} ({method} {path}) which has error responses"
-            )
+
+
+def test_client_file_schema_validation() -> None:
+    spec = _load_openapi_fixture()
+    client_file = _get_client_file()
+
+    ok, errors = validate_client_file(client_file, spec)
+    if not ok:
+        pytest.fail(
+            "Generated client does not match OpenAPI fixture:\n  - "
+            + "\n  - ".join(errors)
+        )

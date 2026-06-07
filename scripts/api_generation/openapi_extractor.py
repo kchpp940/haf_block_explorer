@@ -12,6 +12,7 @@ class OpenAPIEndpoint:
     method: str
     operation_id: str = ""
     parameters: list[dict[str, Any]] = field(default_factory=list)
+    responses: dict[str, Any] = field(default_factory=dict)
     description: str = ""
 
 
@@ -32,6 +33,7 @@ def extract_endpoints_from_spec(spec_dict: dict) -> List[OpenAPIEndpoint]:
 
             operation_id = operation.get("operationId", "")
             parameters = operation.get("parameters", [])
+            responses = operation.get("responses", {})
             description = operation.get("description", "") or operation.get("summary", "")
 
             endpoints.append(
@@ -40,6 +42,7 @@ def extract_endpoints_from_spec(spec_dict: dict) -> List[OpenAPIEndpoint]:
                     method=method.lower(),
                     operation_id=operation_id,
                     parameters=parameters,
+                    responses=responses,
                     description=description,
                 )
             )

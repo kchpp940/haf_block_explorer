@@ -92,4 +92,22 @@ fi
 
 cd "${PROJECT_ROOT}"
 
+if ! poetry -C scripts/api_generation run python generate_and_validate.py validate-fixtures-sync; then
+    echo
+    echo "Fixtures are out of sync — rewrite rules do not match OpenAPI spec."
+    echo
+    echo "Re-export fixtures and re-run:"
+    echo "  poetry -C scripts/api_generation run python generate_and_validate.py export-fixtures"
+    exit 3
+fi
+
+if ! poetry -C scripts/api_generation run python generate_and_validate.py validate-client-schema; then
+    echo
+    echo "Committed client differs from what the OpenAPI fixture declares."
+    echo
+    echo "Regenerate the client and re-run:"
+    echo "  poetry -C scripts/api_generation run python generate_and_validate.py sync-client"
+    exit 3
+fi
+
 exec ./scripts/ci-helpers/run_lint.sh openapi python
